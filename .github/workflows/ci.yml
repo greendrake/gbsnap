@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: lint and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: make lint
+      - run: make test
+
+  release:
+    name: release
+    needs: check
+    # Only a push to a branch whose commit asks for it, and only once the
+    # checks above have passed: nothing is published that did not build clean.
+    if: >-
+      github.event_name == 'push' &&
+      github.ref_type == 'branch' &&
+      contains(github.event.head_commit.message, '[release]')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Release notes are generated from the history since the last tag.
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: make dist
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          tag="v$(cat VERSION)"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "::error::release $tag exists already — bump VERSION before asking for another" >&2
+            exit 1
+          fi
+          # --target pins the tag to the commit that was actually built,
+          # rather than to wherever the default branch has got to by now.
+          gh release create "$tag" \
+            --title "$tag" \
+            --target "$GITHUB_SHA" \
+            --generate-notes \
+            dist/gbsnap-linux-amd64 dist/gbsnap-linux-arm64 dist/SHA256SUMS
