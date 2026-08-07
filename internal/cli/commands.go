@@ -139,6 +139,25 @@ func commands() []*command {
 			return a.engine.List(ctx, volumes[0])
 		},
 	}, {
+		// Transitional, and goes with the rest of the conversion code.
+		name:  "convert",
+		usage: "convert [<volume>...] | convert <pool>...",
+		run: func(ctx context.Context, a *app, args []string) error {
+			locs, adHoc, err := a.pools(args)
+			if err != nil {
+				return err
+			}
+			var volumes []*config.Volume
+			if adHoc {
+				for _, loc := range locs {
+					volumes = append(volumes, config.AdHoc(loc, nil, config.DefaultMin, a.sudo))
+				}
+			} else if volumes, err = a.volumes(args); err != nil {
+				return err
+			}
+			return a.each(ctx, volumes, true, a.engine.Convert)
+		},
+	}, {
 		name:  "status",
 		usage: "status [<volume>...]",
 		run: func(ctx context.Context, a *app, args []string) error {

@@ -60,6 +60,8 @@ file.
     gbsnap prune  <pool> -min <n>         retire all but the newest <n> snapshots of a pool
     gbsnap list   [<volume>|<pool>]       list snapshots
     gbsnap status [<volume>...]           show where each volume stands
+    gbsnap convert [<volume>...]          rename a predecessor's snapshots into gbsnap's naming
+    gbsnap convert <pool>...              the same, for pools named outright
 
 Naming no volume works on every volume in the configuration file. An argument
 holding a slash or a colon is read as a pool path, anything else as a volume
@@ -195,6 +197,41 @@ make, and makes none of them: no directory is created, no snapshot taken or
 deleted, nothing sent. The one thing it will not do is examine a subvolume for
 changes in full, since that would mean writing a throwaway snapshot; it says so
 where that is the check it stopped short of.
+
+## Pools from the predecessor
+
+`gbsnap convert` renames the snapshots of a pool this tool's predecessor filled
+— `2026-08-02.0001`, `2026-07-11.0001-keep` — into the naming above, so that
+such a pool can be carried on with rather than discarded. Until a pool is
+converted every command refuses it, and says so.
+
+    gbsnap convert [<volume>...]     # each volume's pool and every one of its targets
+    gbsnap convert <pool>...         # pools named outright
+
+A volume's pool and its targets are converted together, because a snapshot is
+paired with its copy by name alone: converting one side by itself would leave
+the two unable to recognise what they already share, and the next `gbsnap sync`
+would start again from nothing.
+
+The predecessor recorded the date and nothing finer, so a converted snapshot
+lands on midnight UTC of its date, the sequence number within the date becoming
+the ordinal — `2026-08-02.0001` becomes `20260802T000000Z`, and `.0002` becomes
+`20260802T000000Z.2`. The order the predecessor kept is preserved, and the tag
+travels across. The new name is worked out from the old name alone and never
+from anything the filesystem holds, which is what makes both sides agree on it;
+btrfs records the true creation time regardless.
+
+Renaming leaves a snapshot's UUID untouched, so an incremental chain survives
+the conversion: the first copy after converting is a difference against the
+snapshot the target already holds, not a full resend.
+
+A pool is converted whole or not at all. An entry belonging to neither naming,
+a rename that would land on a name the pool already holds, or something that is
+not a read-only snapshot stops the conversion with nothing renamed. Names
+already in gbsnap's form are left alone, so converting is safe to repeat and
+safe to interrupt, and `-n` shows the renames without making them.
+
+This command exists only to carry pools across, and goes when none are left.
 
 ## Building and testing
 

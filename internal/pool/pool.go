@@ -77,7 +77,10 @@ func (p *Pool) Load(ctx context.Context) error {
 		p.names = append(p.names, n)
 	}
 	if len(strays) > 0 {
-		return fmt.Errorf("pool %s holds entries that are not snapshots: %s", p.Loc, strings.Join(strays, ", "))
+		// The hint goes when "gbsnap convert" does.
+		return fmt.Errorf("pool %s holds entries that are not snapshots: %s"+
+			"; if this tool's predecessor wrote them, gbsnap convert renames them",
+			p.Loc, strings.Join(strays, ", "))
 	}
 	p.sort()
 	return nil

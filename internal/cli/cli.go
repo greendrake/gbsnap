@@ -308,6 +308,8 @@ commands:
   prune   <pool> -min <n>         retire all but the newest <n> snapshots of a pool
   list    [<volume>|<pool>]       list snapshots
   status  [<volume>...]           show where each volume stands
+  convert [<volume>...]           rename a predecessor's snapshots into gbsnap's naming
+  convert <pool>...               the same, for pools named outright
 
 A volume is named in the configuration file. A pool is a directory, written
 [user@]host:path when it is reached over ssh. An argument holding a slash or a
