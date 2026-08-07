@@ -201,9 +201,17 @@ where that is the check it stopped short of.
 ## Pools from the predecessor
 
 `gbsnap convert` renames the snapshots of a pool this tool's predecessor filled
-— `2026-08-02.0001`, `2026-07-11.0001-keep` — into the naming above, so that
-such a pool can be carried on with rather than discarded. Until a pool is
-converted every command refuses it, and says so.
+into the naming above, so that such a pool can be carried on with rather than
+discarded. Until a pool is converted every command refuses it, and says so.
+
+The predecessor spelled the date two ways over its life, and both are read:
+
+| Written by the predecessor | Becomes |
+|---|---|
+| `2026-08-02.0001` | `20260802T000000Z` |
+| `2026-08-02.0002` | `20260802T000000Z.2` |
+| `2023.06.06.01-pinned` | `20230606T000000Z-pinned` |
+| `2023.12.31.11-keep` | `20231231T000000Z.11-keep` |
 
     gbsnap convert [<volume>...]     # each volume's pool and every one of its targets
     gbsnap convert <pool>...         # pools named outright
@@ -215,21 +223,24 @@ would start again from nothing.
 
 The predecessor recorded the date and nothing finer, so a converted snapshot
 lands on midnight UTC of its date, the sequence number within the date becoming
-the ordinal — `2026-08-02.0001` becomes `20260802T000000Z`, and `.0002` becomes
-`20260802T000000Z.2`. The order the predecessor kept is preserved, and the tag
-travels across. The new name is worked out from the old name alone and never
-from anything the filesystem holds, which is what makes both sides agree on it;
-btrfs records the true creation time regardless.
+the ordinal. The order the predecessor kept is preserved, and the tag travels
+across. The width the sequence was written to means nothing, so `.01` and
+`.0001` are both the first of their day. The new name is worked out from the
+old name alone and never from anything the filesystem holds, which is what
+makes both sides agree on it; btrfs records the true creation time regardless.
 
 Renaming leaves a snapshot's UUID untouched, so an incremental chain survives
 the conversion: the first copy after converting is a difference against the
 snapshot the target already holds, not a full resend.
 
 A pool is converted whole or not at all. An entry belonging to neither naming,
-a rename that would land on a name the pool already holds, or something that is
-not a read-only snapshot stops the conversion with nothing renamed. Names
-already in gbsnap's form are left alone, so converting is safe to repeat and
-safe to interrupt, and `-n` shows the renames without making them.
+a rename that would land on a name the pool already holds, two entries that
+would become the same name, or something that is not a read-only snapshot stops
+the conversion with nothing renamed. Since only the date matters, one date and
+sequence written both ways — `2023-06-06.01` and `2023.06.06.01` — is that last
+kind of collision, and is reported rather than letting one displace the other.
+Names already in gbsnap's form are left alone, so converting is safe to repeat
+and safe to interrupt, and `-n` shows the renames without making them.
 
 This command exists only to carry pools across, and goes when none are left.
 

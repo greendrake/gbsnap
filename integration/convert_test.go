@@ -30,7 +30,8 @@ func (e *env) legacySnapshot(name string) {
 func TestConvertKeepsTheIncrementalChain(t *testing.T) {
 	e := setup(t)
 	e.newVolume("first")
-	e.legacySnapshot("2026-07-11.0001-keep")
+	// Both of the predecessor's spellings, as a long-lived pool would hold.
+	e.legacySnapshot("2023.06.06.01-pinned")
 	e.write("second")
 	e.legacySnapshot("2026-08-01.0001")
 	cfg := e.config("volumes:\n  home:\n" +
@@ -59,7 +60,7 @@ func TestConvertKeepsTheIncrementalChain(t *testing.T) {
 	// Both sides carry the new names, the tag among them.
 	for _, pool := range []string{e.src + "/snap", e.dst + "/backup"} {
 		got := strings.Join(e.snapshots(pool), " ")
-		want := "20260711T000000Z-keep 20260801T000000Z"
+		want := "20230606T000000Z-pinned 20260801T000000Z"
 		if got != want {
 			t.Errorf("pool %s holds %q, want %q", pool, got, want)
 		}
@@ -67,7 +68,7 @@ func TestConvertKeepsTheIncrementalChain(t *testing.T) {
 
 	// The snapshot the target already held is still readable under its new
 	// name: renaming moved no data.
-	if got := e.read(filepath.Join(e.dst, "backup", "20260711T000000Z-keep", "file")); got != "first" {
+	if got := e.read(filepath.Join(e.dst, "backup", "20230606T000000Z-pinned", "file")); got != "first" {
 		t.Errorf("target holds %q, want %q", got, "first")
 	}
 

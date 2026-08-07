@@ -80,13 +80,20 @@ func (e *Engine) convertPool(ctx context.Context, v *config.Volume, loc location
 
 	// No two entries may converge on one name, and none may claim a name the
 	// pool already holds. Checked in full before anything moves, so that a
-	// pool gbsnap cannot convert cleanly is left exactly as it was.
+	// pool gbsnap cannot convert cleanly is left exactly as it was. The two
+	// ways of colliding are reported apart, because they are put right
+	// differently: one entry is in the way, or two are the same snapshot named
+	// twice.
+	claimed := map[string]string{}
 	for _, from := range order {
 		to := rename[from].String()
 		if taken[to] {
 			return fmt.Errorf("pool %s: %s would become %s, which the pool already holds", loc, from, to)
 		}
-		taken[to] = true
+		if other, ok := claimed[to]; ok {
+			return fmt.Errorf("pool %s: %s and %s would both become %s", loc, other, from, to)
+		}
+		claimed[to] = from
 	}
 
 	// Adopting something that is not a read-only snapshot would buy a failure

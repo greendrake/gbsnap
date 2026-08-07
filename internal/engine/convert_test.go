@@ -50,6 +50,42 @@ func TestConvertRenamesPoolAndTargets(t *testing.T) {
 	f.mustRun("nas", "mv -T -- /backup/home/2026-07-11.0001-keep /backup/home/20260711T000000Z-keep")
 }
 
+// The predecessor spelled the date two ways over its life, and a pool may hold
+// both.
+func TestConvertBothPredecessorSpellings(t *testing.T) {
+	f := newFixture(t, false)
+	v := volume(t, "/home")
+	f.legacy("/pool/snap/home", "2023.06.06.01-pinned", "2023.12.31.02", "2026-08-02.0001")
+	for _, r := range [][2]string{
+		{"2023.06.06.01-pinned", "20230606T000000Z-pinned"},
+		{"2023.12.31.02", "20231231T000000Z.2"},
+		{"2026-08-02.0001", "20260802T000000Z"},
+	} {
+		f.scriptRename("/pool/snap/home", r[0], r[1])
+	}
+
+	if err := f.e.Convert(context.Background(), v); err != nil {
+		t.Fatal(err)
+	}
+	f.mustRun("", "mv -T -- /pool/snap/home/2023.06.06.01-pinned /pool/snap/home/20230606T000000Z-pinned")
+	f.mustRun("", "mv -T -- /pool/snap/home/2023.12.31.02 /pool/snap/home/20231231T000000Z.2")
+	f.mustRun("", "mv -T -- /pool/snap/home/2026-08-02.0001 /pool/snap/home/20260802T000000Z")
+}
+
+// One date and sequence written both ways is two snapshots that would become
+// one name. Letting either win would lose the other, so the pool is refused.
+func TestConvertRefusesSpellingCollision(t *testing.T) {
+	f := newFixture(t, false)
+	v := volume(t, "/home")
+	f.legacy("/pool/snap/home", "2023-06-06.0001", "2023.06.06.01")
+
+	err := f.e.Convert(context.Background(), v)
+	if err == nil || !strings.Contains(err.Error(), "would both become 20230606T000000Z") {
+		t.Fatalf("Convert = %v", err)
+	}
+	f.mustNotRun("", "mv")
+}
+
 // Names already in this tool's form are left where they are, so a conversion
 // that was interrupted finishes by being run again.
 func TestConvertLeavesConvertedNamesAlone(t *testing.T) {
