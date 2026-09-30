@@ -46,6 +46,7 @@ type app struct {
 	engine  *engine.Engine
 
 	configPath string
+	adds       stringList
 	dryRun     bool
 	verbose    bool
 	quiet      bool
@@ -110,6 +111,7 @@ func Main(args []string, out, errw io.Writer) int {
 		a.printer.Error("%v", err)
 		return exitUsage
 	}
+	defer a.engine.Close()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -172,6 +174,7 @@ func parseAnywhere(fs *flag.FlagSet, args []string) ([]string, error) {
 func (a *app) globals(fs *flag.FlagSet) {
 	fs.StringVar(&a.configPath, "config", a.configPath, "read configuration from `file`")
 	fs.StringVar(&a.configPath, "c", a.configPath, "")
+	fs.Var(&a.adds, "add", "read `file` too, on top of the configuration found")
 	fs.BoolVar(&a.dryRun, "dry-run", a.dryRun, "report what would change, and change nothing")
 	fs.BoolVar(&a.dryRun, "n", a.dryRun, "")
 	fs.BoolVar(&a.verbose, "verbose", a.verbose, "echo the commands gbsnap runs")
@@ -199,28 +202,53 @@ func (a *app) settle(sets ...*flag.FlagSet) error {
 	return nil
 }
 
-// config reads the configuration file, once.
-func (a *app) config() (*config.Config, error) {
+// stringList is a flag that may be given more than once.
+type stringList []string
+
+func (l *stringList) String() string     { return strings.Join(*l, ", ") }
+func (l *stringList) Set(s string) error { *l = append(*l, s); return nil }
+
+// config reads the configuration, once: the files found, then any added on
+// top, with the volumes its patterns stand for found.
+func (a *app) config(ctx context.Context) (*config.Config, error) {
 	if a.cfg != nil {
 		return a.cfg, nil
 	}
-	path, err := config.Find(a.configPath)
+	paths, err := config.Find(a.configPath)
 	if err != nil {
 		return nil, usageError{err}
 	}
-	if path == "" {
-		return nil, usagef("no configuration file: looked for $GBSNAP_CONFIG, ~/.config/gbsnap.yaml and /etc/gbsnap.yaml")
+	for _, add := range a.adds {
+		if _, err := os.Stat(add); err != nil {
+			return nil, usageError{err}
+		}
+		paths = append(paths, add)
 	}
-	if a.cfg, err = config.Load(path); err != nil {
+	if len(paths) == 0 {
+		return nil, usagef("no configuration: looked for $GBSNAP_CONFIG, ~/.config/gbsnap.yaml and /etc/gbsnap.yaml, " +
+			"and for the .d directory of drop-ins beside each")
+	}
+	cfg, err := config.Load(paths...)
+	if err != nil {
 		return nil, usageError{err}
 	}
+	err = cfg.Expand(ctx, func(ctx context.Context, dir location.Location, sudo run.SudoMode) ([]string, error) {
+		if a.sudoGiven {
+			sudo = a.sudo
+		}
+		return a.engine.Subvolumes(ctx, dir, sudo)
+	})
+	if err != nil {
+		return nil, err
+	}
+	a.cfg = cfg
 	return a.cfg, nil
 }
 
 // volumes selects the configured volumes named on the command line, or all of
 // them when none is named.
-func (a *app) volumes(names []string) ([]*config.Volume, error) {
-	cfg, err := a.config()
+func (a *app) volumes(ctx context.Context, names []string) ([]*config.Volume, error) {
+	cfg, err := a.config(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -308,16 +336,22 @@ commands:
   prune   <pool> -min <n>         retire all but the newest <n> snapshots of a pool
   list    [<volume>|<pool>]       list snapshots
   status  [<volume>...]           show where each volume stands
+  restore <volume>                bring a volume's pool back from its first reachable target
+  untag   <volume> <snapshot>     take a snapshot's tag off, here and at its targets
+  init    <dir>                   mark a directory as a place for pools
+  forget  <target>                stop keeping snapshots for a target retired for good
   convert [<volume>...]           rename a predecessor's snapshots into gbsnap's naming
   convert <pool>...               the same, for pools named outright
 
-A volume is named in the configuration file. A pool is a directory, written
+A volume is named in the configuration. A pool is a directory, written
 [user@]host:path when it is reached over ssh. An argument holding a slash or a
 colon is read as a pool, anything else as a volume name.
 
 flags:
-  -c, -config file   read configuration from file
-                     (default $GBSNAP_CONFIG, ~/.config/gbsnap.yaml, /etc/gbsnap.yaml)
+  -c, -config file   read configuration from file and the drop-ins beside it
+                     (default $GBSNAP_CONFIG, ~/.config/gbsnap.yaml, /etc/gbsnap.yaml,
+                     each with the .d directory beside it)
+  -add file          read file too, on top of the configuration found
   -n, -dry-run       report what would change, and change nothing
   -v, -verbose       echo the commands gbsnap runs
   -q, -quiet         report errors only
@@ -325,8 +359,13 @@ flags:
   -version           print the version and exit
 
 command flags:
-  snap  -tag name    tag the new snapshot, protecting it from pruning
-        -force       snapshot even if the subvolume is unchanged
-  prune -min n       how many recent snapshots to keep
+  snap  -tag name        tag the new snapshot, protecting it from pruning
+        -force           snapshot even if the subvolume is unchanged
+  run   -reach           fail on a target that is offline, rather than skip it
+  sync  -reach           the same
+        -snapshot name   send that one snapshot to each target lacking it, however old
+  restore -snapshot name bring back that one snapshot, however old
+  prune -min n           how many recent snapshots to keep
+        -local           prune the volume's own pool alone, reaching no target
 `)
 }

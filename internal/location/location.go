@@ -36,6 +36,14 @@ func Parse(s string) (Location, error) {
 // Remote reports whether the location needs an ssh hop.
 func (l Location) Remote() bool { return l.Host != "" }
 
+// Parent addresses the directory holding this one.
+func (l Location) Parent() Location {
+	return Location{Host: l.Host, Path: path.Dir(path.Clean(l.Path))}
+}
+
+// Base is the last element of the path.
+func (l Location) Base() string { return path.Base(path.Clean(l.Path)) }
+
 // Child addresses an entry inside the directory.
 func (l Location) Child(name string) Location {
 	return Location{Host: l.Host, Path: path.Join(l.Path, name)}

@@ -63,3 +63,16 @@ func TestChildAndEqual(t *testing.T) {
 		t.Error("expected remote")
 	}
 }
+
+func TestParentAndBase(t *testing.T) {
+	l, err := Parse("nas:/backup/ws/home/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := l.Parent().String(); got != "nas:/backup/ws" {
+		t.Errorf("Parent = %q", got)
+	}
+	if got := l.Base(); got != "home" {
+		t.Errorf("Base = %q", got)
+	}
+}

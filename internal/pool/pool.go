@@ -134,6 +134,26 @@ func (p *Pool) Add(n Name) {
 	p.sort()
 }
 
+// Rename records a snapshot gbsnap has just renamed.
+func (p *Pool) Rename(from, to Name) {
+	for i, e := range p.names {
+		if e.String() == from.String() {
+			p.names[i] = to
+		}
+	}
+	p.sort()
+}
+
+// Find looks a snapshot up by its exact name.
+func (p *Pool) Find(name string) (Name, bool) {
+	for _, n := range p.names {
+		if n.String() == name {
+			return n, true
+		}
+	}
+	return Name{}, false
+}
+
 // Remove forgets a snapshot gbsnap has just deleted.
 func (p *Pool) Remove(n Name) {
 	p.names = slices.DeleteFunc(p.names, func(e Name) bool { return e.String() == n.String() })

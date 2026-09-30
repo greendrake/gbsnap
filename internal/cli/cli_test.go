@@ -19,6 +19,15 @@ func runGbsnap(t *testing.T, args ...string) (int, string) {
 	return code, out.String()
 }
 
+// markPlace makes dir a place for pools, as gbsnap init would on btrfs.
+func markPlace(t *testing.T, dir string) {
+	t.Helper()
+	marker := filepath.Join(dir, ".gbsnap-place")
+	if err := os.WriteFile(marker, []byte("0123456789abcdef0123456789abcdef\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // configFile writes a configuration naming pools under dir, none of which
 // exist yet.
 func configFile(t *testing.T, body string) string {
@@ -100,6 +109,7 @@ func TestFlagsAfterArguments(t *testing.T) {
 // neither root nor btrfs.
 func TestDryRunCycle(t *testing.T) {
 	dir := t.TempDir()
+	markPlace(t, dir)
 	cfg := configFile(t, "volumes:\n  home:\n    subvolume: "+dir+"/home\n    pool: "+dir+"/snap\n"+
 		"    targets: ["+dir+"/backup]\n")
 
@@ -130,6 +140,7 @@ func TestDryRunAdHocSync(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(dir, "src", "20260807T143205Z"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	markPlace(t, dir)
 
 	code, out := runGbsnap(t, "-sudo", "never", "-n", "sync", dir+"/src", dir+"/dst")
 	if code != exitOK {
@@ -282,5 +293,62 @@ func TestLockPathIsReadableAndUnique(t *testing.T) {
 	}
 	if !strings.Contains(filepath.Base(a), "nas_") {
 		t.Errorf("lock file %q should hint at its key", a)
+	}
+}
+
+// A destination named outright that is not there, and not in a marked place,
+// is a failure, not a target to skip: nothing is created there.
+func TestAdHocSyncToOfflineDestination(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "src", "20260807T143205Z"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	code, out := runGbsnap(t, "-sudo", "never", "sync", dir+"/src", dir+"/unmounted/dst")
+	if code != exitFailure || !strings.Contains(out, "offline") {
+		t.Errorf("exit %d; output:\n%s", code, out)
+	}
+	if _, err := os.Stat(dir + "/unmounted"); !os.IsNotExist(err) {
+		t.Error("nothing should have been created at the destination")
+	}
+}
+
+// The drop-ins beside a configuration file are read after it, and a file named
+// with -add on top of both; volumes from one piece take defaults from another.
+func TestConfigurationInPieces(t *testing.T) {
+	dir := t.TempDir()
+	backup := filepath.Join(dir, "backup")
+	if err := os.MkdirAll(backup, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	markPlace(t, backup)
+	for _, name := range []string{"one", "two"} {
+		if err := os.MkdirAll(filepath.Join(dir, "snap", name, "20260807T143205Z"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	main := configFile(t, "defaults:\n  targets: ["+backup+"]\n")
+	dropIns := strings.TrimSuffix(main, ".yaml") + ".d"
+	if err := os.MkdirAll(dropIns, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	piece := "volumes:\n  one:\n    pool: " + dir + "/snap/one\n"
+	if err := os.WriteFile(filepath.Join(dropIns, "tool.yaml"), []byte(piece), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	added := filepath.Join(t.TempDir(), "added.yaml")
+	if err := os.WriteFile(added, []byte("volumes:\n  two:\n    pool: "+dir+"/snap/two\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	code, out := runGbsnap(t, "-c", main, "-add", added, "-sudo", "never", "-n", "sync")
+	if code != exitOK {
+		t.Fatalf("exit %d; output:\n%s", code, out)
+	}
+	// Each volume's target is a pool named after it in the place the defaults
+	// name.
+	for _, want := range []string{"to " + backup + "/one in full", "to " + backup + "/two in full"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output should report %q:\n%s", want, out)
+		}
 	}
 }

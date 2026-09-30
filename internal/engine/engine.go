@@ -5,6 +5,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/greendrake/gbsnap/internal/config"
@@ -57,6 +58,15 @@ func (e *Engine) runner(loc location.Location, sudo run.SudoMode) run.Runner {
 	return r
 }
 
+// Close lets go of the runners, ending any sudo keep-alive they started.
+func (e *Engine) Close() {
+	for _, r := range e.runners {
+		if c, ok := r.(io.Closer); ok {
+			c.Close()
+		}
+	}
+}
+
 // do reports a change and, unless this is a dry run, makes it.
 func (e *Engine) do(desc string, change func() error) error {
 	if e.dryRun {
@@ -74,7 +84,21 @@ type volumeRun struct {
 	e       *Engine
 	v       *config.Volume
 	src     *pool.Pool
-	targets map[string]*pool.Pool
+	targets map[string]*target
+	records *pool.Records // what the pool knows of its targets, read on first use
+}
+
+// target is one of a volume's targets, as this run found it.
+type target struct {
+	loc  location.Location
+	pool *pool.Pool // nil while the target is offline
+	// key is what the pool's records know the target by: the ID of the place
+	// holding it and the pool's name there, or the pool's location for a pool
+	// in a place gbsnap init never marked.
+	key string
+	// offline says why the target could not be reached, and is empty when it
+	// was.
+	offline string
 }
 
 func (e *Engine) open(ctx context.Context, v *config.Volume) (*volumeRun, error) {
@@ -85,19 +109,97 @@ func (e *Engine) open(ctx context.Context, v *config.Volume) (*volumeRun, error)
 	if v.AdHoc && !src.Exists() {
 		return nil, fmt.Errorf("pool %s does not exist", v.Pool)
 	}
-	return &volumeRun{e: e, v: v, src: src, targets: map[string]*pool.Pool{}}, nil
+	return &volumeRun{e: e, v: v, src: src, targets: map[string]*target{}}, nil
 }
 
-func (s *volumeRun) target(ctx context.Context, loc location.Location) (*pool.Pool, error) {
-	if p, ok := s.targets[loc.String()]; ok {
-		return p, nil
+// target reaches one of the volume's targets, once per run. A target that is
+// not there is offline rather than empty: a pool that does not exist is only
+// taken for one yet to be created when it sits in a place gbsnap init marked,
+// and a host ssh cannot reach is offline too.
+func (s *volumeRun) target(ctx context.Context, loc location.Location) (*target, error) {
+	if t, ok := s.targets[loc.String()]; ok {
+		return t, nil
 	}
-	p := pool.New(loc, s.e.runner(loc, s.v.Sudo))
+	t := &target{loc: loc}
+	unreachable := func(err error) (*target, error) {
+		if !run.Unreachable(err) {
+			return nil, err
+		}
+		t.offline = fmt.Sprintf("%s cannot be reached", loc.Host)
+		s.targets[loc.String()] = t
+		return t, nil
+	}
+	r := s.e.runner(loc, s.v.Sudo)
+	place := loc.Parent()
+	id, err := pool.ReadPlace(ctx, r, place.Path)
+	if err != nil {
+		return unreachable(err)
+	}
+	p := pool.New(loc, r)
 	if err := p.Load(ctx); err != nil {
+		return unreachable(err)
+	}
+	switch {
+	case id != "":
+		t.key = id + "/" + loc.Base()
+		t.pool = p
+	case p.Exists():
+		t.key = loc.Canonical()
+		t.pool = p
+	default:
+		t.offline = fmt.Sprintf("%s holds no pool %s and is not a place gbsnap init marked (is a disk not mounted?)",
+			place, loc.Base())
+	}
+	s.targets[loc.String()] = t
+	return t, nil
+}
+
+// loadRecords reads what the pool knows of its targets, once per run.
+func (s *volumeRun) loadRecords(ctx context.Context) (*pool.Records, error) {
+	if s.records != nil {
+		return s.records, nil
+	}
+	rs, err := s.src.LoadRecords(ctx)
+	if err != nil {
 		return nil, err
 	}
-	s.targets[loc.String()] = p
-	return p, nil
+	s.records = rs
+	return rs, nil
+}
+
+// remember records the newest snapshot a reachable target shares with the
+// pool, or that it shares none. A dry run records nothing, as it changes
+// nothing.
+func (s *volumeRun) remember(ctx context.Context, t *target) error {
+	rs, err := s.loadRecords(ctx)
+	if err != nil {
+		return err
+	}
+	var changed bool
+	if n, ok := pool.Common(s.src.Names(), t.pool.Names()); ok {
+		changed = rs.Set(pool.Record{Target: t.key, Location: t.loc.String(), Snapshot: n.String(), Since: s.e.now().UTC()})
+	} else {
+		changed = len(rs.Drop(func(r pool.Record) bool { return r.Target == t.key })) > 0
+	}
+	if !changed || s.e.dryRun {
+		return nil
+	}
+	return s.src.SaveRecords(ctx, rs)
+}
+
+// recorded finds the record of a target, by its key when the run reached it
+// and by where it was last reached when it did not.
+func (s *volumeRun) recorded(ctx context.Context, t *target) (pool.Record, bool, error) {
+	rs, err := s.loadRecords(ctx)
+	if err != nil {
+		return pool.Record{}, false, err
+	}
+	for _, r := range rs.List {
+		if (t.key != "" && r.Target == t.key) || (t.key == "" && r.Location == t.loc.String()) {
+			return r, true, nil
+		}
+	}
+	return pool.Record{}, false, nil
 }
 
 // ensure creates a pool directory that is not there yet.
@@ -117,28 +219,51 @@ func (e *Engine) Snap(ctx context.Context, v *config.Volume, tag string, force b
 	return s.snap(ctx, tag, force)
 }
 
-// Sync copies a volume's snapshots to each of its targets.
-func (e *Engine) Sync(ctx context.Context, v *config.Volume) error {
+// SyncOpts shapes a replication.
+type SyncOpts struct {
+	// Reach makes a target that is offline a failure rather than something to
+	// skip.
+	Reach bool
+	// Snapshot, when set, sends that one snapshot to each target lacking it,
+	// however old, instead of everything newer than what the two share.
+	Snapshot string
+}
+
+// Sync copies a volume's snapshots to each of its targets. A destination named
+// outright on the command line has to be reached, as its source has to exist:
+// neither is something to skip in silence.
+func (e *Engine) Sync(ctx context.Context, v *config.Volume, o SyncOpts) error {
+	if v.AdHoc {
+		o.Reach = true
+	}
 	s, err := e.open(ctx, v)
 	if err != nil {
 		return err
 	}
-	return s.sync(ctx)
+	return s.sync(ctx, o)
+}
+
+// PruneOpts shapes a pruning.
+type PruneOpts struct {
+	// Local keeps pruning to the volume's own pool, reaching no target: what
+	// each target needs is taken from the pool's records.
+	Local bool
 }
 
 // Prune retires the snapshots that a volume's retention no longer covers.
-func (e *Engine) Prune(ctx context.Context, v *config.Volume) error {
+func (e *Engine) Prune(ctx context.Context, v *config.Volume, o PruneOpts) error {
 	s, err := e.open(ctx, v)
 	if err != nil {
 		return err
 	}
-	return s.prune(ctx)
+	return s.prune(ctx, o)
 }
 
 // Run is the whole cycle for one volume. Pruning is skipped when replication
 // failed: with a target's contents unknown, there is no telling which snapshots
-// it still needs.
-func (e *Engine) Run(ctx context.Context, v *config.Volume) error {
+// it still needs. A target that is offline is no failure unless reach is set,
+// and pruning then keeps what its record says it needs.
+func (e *Engine) Run(ctx context.Context, v *config.Volume, reach bool) error {
 	s, err := e.open(ctx, v)
 	if err != nil {
 		return err
@@ -146,8 +271,8 @@ func (e *Engine) Run(ctx context.Context, v *config.Volume) error {
 	if err := s.snap(ctx, "", false); err != nil {
 		return err
 	}
-	if err := s.sync(ctx); err != nil {
+	if err := s.sync(ctx, SyncOpts{Reach: reach}); err != nil {
 		return err
 	}
-	return s.prune(ctx)
+	return s.prune(ctx, PruneOpts{})
 }

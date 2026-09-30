@@ -76,6 +76,18 @@ func (n Name) String() string {
 	return s
 }
 
+// Same reports whether two names are of one snapshot, whatever tag each
+// carries: a tag can come and go, but the time and ordinal never change.
+func (n Name) Same(o Name) bool {
+	return n.Time.Equal(o.Time) && n.Ordinal == o.Ordinal
+}
+
+// Untagged is the name without its tag.
+func (n Name) Untagged() Name {
+	n.Tag = ""
+	return n
+}
+
 // Protected reports whether pruning must leave the snapshot alone.
 func (n Name) Protected() bool { return n.Tag != "" }
 

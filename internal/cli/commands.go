@@ -3,8 +3,11 @@ package cli
 import (
 	"context"
 	"flag"
+	"fmt"
 
 	"github.com/greendrake/gbsnap/internal/config"
+	"github.com/greendrake/gbsnap/internal/engine"
+	"github.com/greendrake/gbsnap/internal/location"
 	"github.com/greendrake/gbsnap/internal/pool"
 )
 
@@ -28,19 +31,24 @@ func lookup(name string) *command {
 // commands builds the table afresh so that each command owns the variables its
 // flags write into.
 func commands() []*command {
-	var tag string
-	var force bool
+	var tag, snapshot string
+	var force, reach, local bool
 	var min int
 
 	return []*command{{
 		name:  "run",
-		usage: "run [<volume>...]",
+		usage: "run [<volume>...] [-reach]",
+		flags: func(fs *flag.FlagSet) {
+			fs.BoolVar(&reach, "reach", false, "fail on a target that is offline, rather than skip it")
+		},
 		run: func(ctx context.Context, a *app, args []string) error {
-			volumes, err := a.volumes(args)
+			volumes, err := a.volumes(ctx, args)
 			if err != nil {
 				return err
 			}
-			return a.each(ctx, volumes, true, a.engine.Run)
+			return a.each(ctx, volumes, true, func(ctx context.Context, v *config.Volume) error {
+				return a.engine.Run(ctx, v, reach)
+			})
 		},
 	}, {
 		name:  "snap",
@@ -55,7 +63,7 @@ func commands() []*command {
 					return usageError{err}
 				}
 			}
-			volumes, err := a.volumes(args)
+			volumes, err := a.volumes(ctx, args)
 			if err != nil {
 				return err
 			}
@@ -65,7 +73,11 @@ func commands() []*command {
 		},
 	}, {
 		name:  "sync",
-		usage: "sync [<volume>...] | sync <src-pool> <dst-pool>",
+		usage: "sync [<volume>...] | sync <src-pool> <dst-pool> [-reach] [-snapshot <name>]",
+		flags: func(fs *flag.FlagSet) {
+			fs.BoolVar(&reach, "reach", false, "fail on a target that is offline, rather than skip it")
+			fs.StringVar(&snapshot, "snapshot", "", "send that one snapshot to each target lacking it, however old")
+		},
 		run: func(ctx context.Context, a *app, args []string) error {
 			locs, adHoc, err := a.pools(args)
 			if err != nil {
@@ -74,7 +86,7 @@ func commands() []*command {
 			var volumes []*config.Volume
 			switch {
 			case !adHoc:
-				if volumes, err = a.volumes(args); err != nil {
+				if volumes, err = a.volumes(ctx, args); err != nil {
 					return err
 				}
 			case len(locs) != 2:
@@ -84,13 +96,22 @@ func commands() []*command {
 			default:
 				volumes = []*config.Volume{config.AdHoc(locs[0], locs[1:], config.DefaultMin, a.sudo)}
 			}
-			return a.each(ctx, volumes, true, a.engine.Sync)
+			if snapshot != "" {
+				if _, err := pool.ParseName(snapshot); err != nil {
+					return usageError{err}
+				}
+			}
+			o := engine.SyncOpts{Reach: reach, Snapshot: snapshot}
+			return a.each(ctx, volumes, true, func(ctx context.Context, v *config.Volume) error {
+				return a.engine.Sync(ctx, v, o)
+			})
 		},
 	}, {
 		name:  "prune",
-		usage: "prune [<volume>...] | prune <pool> -min <n>",
+		usage: "prune [<volume>...] [-local] | prune <pool> -min <n>",
 		flags: func(fs *flag.FlagSet) {
 			fs.IntVar(&min, "min", 0, "how many recent snapshots to keep")
+			fs.BoolVar(&local, "local", false, "prune the volume's own pool alone, reaching no target")
 		},
 		run: func(ctx context.Context, a *app, args []string) error {
 			locs, adHoc, err := a.pools(args)
@@ -103,7 +124,7 @@ func commands() []*command {
 				if min != 0 {
 					return usagef("-min applies to a pool named on the command line, not to configured volumes, which carry their own retention")
 				}
-				if volumes, err = a.volumes(args); err != nil {
+				if volumes, err = a.volumes(ctx, args); err != nil {
 					return err
 				}
 			case len(locs) != 1:
@@ -113,7 +134,10 @@ func commands() []*command {
 			default:
 				volumes = []*config.Volume{config.AdHoc(locs[0], nil, min, a.sudo)}
 			}
-			return a.each(ctx, volumes, true, a.engine.Prune)
+			o := engine.PruneOpts{Local: local}
+			return a.each(ctx, volumes, true, func(ctx context.Context, v *config.Volume) error {
+				return a.engine.Prune(ctx, v, o)
+			})
 		},
 	}, {
 		name:  "list",
@@ -129,7 +153,7 @@ func commands() []*command {
 				}
 				return a.engine.List(ctx, config.AdHoc(locs[0], nil, 1, a.sudo))
 			}
-			volumes, err := a.volumes(args)
+			volumes, err := a.volumes(ctx, args)
 			if err != nil {
 				return err
 			}
@@ -152,7 +176,7 @@ func commands() []*command {
 				for _, loc := range locs {
 					volumes = append(volumes, config.AdHoc(loc, nil, config.DefaultMin, a.sudo))
 				}
-			} else if volumes, err = a.volumes(args); err != nil {
+			} else if volumes, err = a.volumes(ctx, args); err != nil {
 				return err
 			}
 			return a.each(ctx, volumes, true, a.engine.Convert)
@@ -161,13 +185,97 @@ func commands() []*command {
 		name:  "status",
 		usage: "status [<volume>...]",
 		run: func(ctx context.Context, a *app, args []string) error {
-			volumes, err := a.volumes(args)
+			volumes, err := a.volumes(ctx, args)
 			if err != nil {
 				return err
 			}
 			// Status only reads, so it takes no locks: it has to answer while
 			// a backup run is holding them.
 			return a.each(ctx, volumes, false, a.engine.Status)
+		},
+	}, {
+		name:  "restore",
+		usage: "restore <volume> [-snapshot <name>]",
+		flags: func(fs *flag.FlagSet) {
+			fs.StringVar(&snapshot, "snapshot", "", "bring back that one snapshot, however old")
+		},
+		run: func(ctx context.Context, a *app, args []string) error {
+			if len(args) != 1 {
+				return usagef("restore takes one volume, given %d", len(args))
+			}
+			if snapshot != "" {
+				if _, err := pool.ParseName(snapshot); err != nil {
+					return usageError{err}
+				}
+			}
+			cfg, err := a.config(ctx)
+			if err != nil {
+				return err
+			}
+			// A volume a pattern stands for can be restored before its
+			// subvolume is there: bringing it back is the point.
+			v, err := cfg.Volume(args[0])
+			if err != nil {
+				if v, err = cfg.Absent(args[0]); err != nil {
+					return usageError{err}
+				}
+			}
+			if a.sudoGiven {
+				v.Sudo = a.sudo
+			}
+			return a.each(ctx, []*config.Volume{v}, true, func(ctx context.Context, v *config.Volume) error {
+				return a.engine.Restore(ctx, v, snapshot)
+			})
+		},
+	}, {
+		name:  "untag",
+		usage: "untag <volume> <snapshot>",
+		run: func(ctx context.Context, a *app, args []string) error {
+			if len(args) != 2 {
+				return usagef("untag takes a volume and one of its snapshots")
+			}
+			volumes, err := a.volumes(ctx, args[:1])
+			if err != nil {
+				return err
+			}
+			return a.each(ctx, volumes, true, func(ctx context.Context, v *config.Volume) error {
+				return a.engine.Untag(ctx, v, args[1])
+			})
+		},
+	}, {
+		name:  "init",
+		usage: "init <dir>",
+		run: func(ctx context.Context, a *app, args []string) error {
+			if len(args) != 1 {
+				return usagef("init takes one directory, given %d", len(args))
+			}
+			loc, err := location.Parse(args[0])
+			if err != nil {
+				return usageError{err}
+			}
+			return a.engine.Init(ctx, loc, a.sudo)
+		},
+	}, {
+		name:  "forget",
+		usage: "forget <target>",
+		run: func(ctx context.Context, a *app, args []string) error {
+			if len(args) != 1 {
+				return usagef("forget takes one target, given %d", len(args))
+			}
+			volumes, err := a.volumes(ctx, nil)
+			if err != nil {
+				return err
+			}
+			forgot := 0
+			err = a.each(ctx, volumes, true, func(ctx context.Context, v *config.Volume) error {
+				n, err := a.engine.Forget(ctx, v, args[0])
+				forgot += n
+				return err
+			})
+			if err == nil && forgot == 0 {
+				return fmt.Errorf("no volume's pool has a record of %s", args[0])
+			}
+			return err
 		},
 	}}
 }

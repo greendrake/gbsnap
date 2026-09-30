@@ -5,7 +5,10 @@ the same machine. It takes read-only snapshots of live subvolumes, sends them on
 incrementally, and retires the old ones.
 
 A single static binary. It needs `btrfs-progs` on both sides, `ssh` for remote
-pools, and root, which it takes with `sudo` where it is not already root.
+pools, and root, which it takes with `sudo` where it is not already root. A
+remote host's `sudo` has no terminal to ask for a password on, so there it has
+to need none. The local one may ask once, and gbsnap then keeps it from
+forgetting for as long as it runs, however long one send takes.
 
 ## Install
 
@@ -49,6 +52,8 @@ file.
 - A **volume** names one subvolume, the pool its snapshots go into, and any
   number of **targets** the pool is copied to. Targets are ordinary pools, so
   restoring is replication run the other way.
+- A **place** is a directory `gbsnap init` marked as somewhere pools may be
+  created: the root of a backup disk, or a directory on a backup host.
 
 ## Commands
 
@@ -60,24 +65,38 @@ file.
     gbsnap prune  <pool> -min <n>         retire all but the newest <n> snapshots of a pool
     gbsnap list   [<volume>|<pool>]       list snapshots
     gbsnap status [<volume>...]           show where each volume stands
+    gbsnap restore <volume>               bring a volume's pool back from its first reachable target
+    gbsnap untag  <volume> <snapshot>     take a snapshot's tag off, here and at its targets
+    gbsnap init   <dir>                   mark a directory as a place for pools
+    gbsnap forget <target>                stop keeping snapshots for a target retired for good
     gbsnap convert [<volume>...]          rename a predecessor's snapshots into gbsnap's naming
     gbsnap convert <pool>...              the same, for pools named outright
 
-Naming no volume works on every volume in the configuration file. An argument
+Naming no volume works on every volume in the configuration. An argument
 holding a slash or a colon is read as a pool path, anything else as a volume
-name, so the two-pool forms need no configuration file at all.
+name, so the two-pool forms need no configuration at all.
 
-Flags: `-c/-config`, `-n/-dry-run`, `-v/-verbose`, `-q/-quiet`, `-sudo`, and
-`-version`. `gbsnap snap` also takes `-tag` and `-force`; `gbsnap prune` takes `-min`.
-A flag may come before the command or after it, and after the volumes or pools
-it applies to.
+Flags: `-c/-config`, `-add`, `-n/-dry-run`, `-v/-verbose`, `-q/-quiet`, `-sudo`,
+and `-version`. `gbsnap snap` also takes `-tag` and `-force`; `gbsnap run` and
+`gbsnap sync` take `-reach`; `gbsnap sync` and `gbsnap restore` take `-snapshot`; `gbsnap prune`
+takes `-min` and `-local`. A flag may come before the command or after it, and
+after the volumes or pools it applies to.
 
 Exit status is 0 when all is well, 1 when a volume could not be dealt with, and
 2 when the command line or the configuration file is wrong.
 
 ## Configuration
 
-Read from `-c`, else `$GBSNAP_CONFIG`, `~/.config/gbsnap.yaml` or `/etc/gbsnap.yaml`.
+Read from `-c`, else `$GBSNAP_CONFIG`, `~/.config/gbsnap.yaml` or `/etc/gbsnap.yaml`,
+whichever is there first, each together with the drop-ins in the `.d` directory
+beside it (`gbsnap.d` beside `gbsnap.yaml`), read after it in name order. The
+drop-ins alone make a configuration, with no file beside them. `-add` reads one
+more file on top of whatever that finds, and may be given more than once.
+
+Each piece may set defaults, a later piece's winning over an earlier's, and
+each may add volumes, which the defaults apply to wherever they were written.
+No one piece has to hold volumes, but the whole has to. So a tool can own the
+volumes it defines, in a drop-in of its own, and leave the rest to you.
 
 ```yaml
 defaults:                     # every key can be overridden per volume
@@ -111,6 +130,36 @@ volumes:
 Volumes are worked through in the order they are written. A volume that fails
 does not stop the others, and the run as a whole then exits 1.
 
+### Targets in the defaults
+
+In the defaults, `targets` names places rather than pools: each volume that has
+no `targets` of its own gets a pool named after it in each place. A volume's own
+`targets` win, and `targets: []` gives it none.
+
+```yaml
+defaults:
+  targets: [backup@nas:/backup]   # home goes to nas:/backup/home, etc to nas:/backup/etc
+```
+
+### Volumes by pattern
+
+A volume whose subvolume ends in `/*` stands for every subvolume directly inside
+that directory, each a volume of its own, named after its subvolume. Its pool,
+and any targets of its own, have a `*` where that name goes; without targets of
+its own, each gets a pool named after it in the places the defaults name. Names
+starting with a dot never match, nor does anything that is not a subvolume, and
+`exclude` leaves out the names it lists. The volumes found take the pattern's
+place among the others, in name order, and are found afresh at every run, so a
+fixed configuration covers subvolumes as they come and go.
+
+```yaml
+volumes:
+  vms:
+    subvolume: /var/lib/vms/*
+    pool: /var/lib/vms/.snap/*
+    exclude: [scratch]
+```
+
 ### Where a subvolume and its pool may live
 
 A snapshot can only be taken within one filesystem, so a subvolume and its pool
@@ -142,6 +191,12 @@ A name may carry a tag, `20260807T143205Z-keep`. A tagged snapshot is protected:
 retention never touches it. Tags come from `gbsnap snap -tag`, they are visible in a
 plain `ls`, and they travel with the snapshot when it is replicated.
 
+`gbsnap untag <volume> <snapshot>` takes the tag off again, in the pool and at
+every target it can reach. A target that is offline has its copy renamed when
+it is next reached: a snapshot is paired with its copy by name, so the next
+sync or pruning looks for copies that differ from the pool's snapshots by their
+tag alone, and renames each once the UUID check has confirmed it is a copy.
+
 ## Retention
 
 `min: n` keeps the newest `n` snapshots of a pool. Two kinds of snapshot are
@@ -149,11 +204,52 @@ outside that count and are kept as well as those `n`, not instead of one of
 them:
 
 - tagged snapshots, for as long as they carry a tag;
-- the newest snapshot a pool and one of its targets both hold, which the next
-  incremental send needs as its parent.
+- for each target, the newest snapshot the pool and the target both hold, which
+  the next incremental send needs as its parent. For a target that cannot be
+  reached, the pool's record of it says which that is (see below).
 
 Because the parent is pinned by policy rather than by luck, retention can be as
-short as you like without ever forcing a full resend.
+short as you like without ever forcing a full resend, however long a target is
+away.
+
+`gbsnap prune -local` prunes a volume's own pool alone, reaching no target at
+all and going by the records.
+
+## Places, and targets that are offline
+
+A pool that is not there does not read as an empty one waiting to be filled. A
+backup disk that is not mounted leaves a bare mount point behind, and a tool
+taking that for an empty pool would create one on whatever filesystem holds the
+mount point, and send everything into it.
+
+So on the receiving side of a send, gbsnap only creates a pool inside a place:
+a directory `gbsnap init <dir>` has marked, which it only does on btrfs. It
+writes a `.gbsnap-place` file there holding an ID of the place's own. `init`
+takes a remote directory as well, `[user@]host:path`. A pool that already exists
+is used wherever it is, marked or not.
+
+A target is **offline** when its pool is not there and its place is not marked,
+or when ssh cannot reach its host. `gbsnap sync` and `gbsnap run` skip it and
+say so, and the run does not fail for it, unless `-reach` asked it to reach
+every target. A destination named outright on the command line always has to be
+reached.
+
+After each send, the pool records the newest snapshot the target now shares
+with it, in a `.gbsnap-targets` file in the pool's directory, keyed by the
+place's ID and the pool's name there. So a target reached by another path or
+address is still known as itself, and two disks taking turns at one mount point
+are known apart. While a target is offline, pruning keeps the snapshot its
+record names. The record is only ever trusted to say what to keep, never what to
+build on: that is for the UUID check to settle once the target is reached.
+
+`gbsnap status` shows each target's record: what it last received and when,
+whether it is offline, and any target the pool keeps a snapshot for though it
+is no longer configured. `gbsnap forget <target>` drops the record of a target
+retired for good, named by its pool, its place or its ID, so that pruning stops
+keeping a snapshot for it.
+
+A target last reached by a version of gbsnap from before records has none until
+it is next reached.
 
 ## How a change is noticed
 
@@ -173,12 +269,31 @@ extended attributes, a file added or removed — except timestamps on their own.
 ## What is checked before trusting a copy
 
 Before sending a difference, the target's copy of the parent must carry the UUID
-it would have got by being received from this pool. A copy that does not is
-reported as diverged and nothing is sent, because a difference applied to the
-wrong history produces a backup that looks fine and is not.
+it would have got by being received from this pool, or, sent back the other way
+as a restore is, be the very snapshot the pool's copy was received from. A copy
+that is neither is reported as diverged and nothing is sent, because a
+difference applied to the wrong history produces a backup that looks fine and
+is not.
 
 After sending, the snapshot that arrived is checked the same way. Only then may
 pruning let go of anything.
+
+## Restoring
+
+Replication run the other way is a restore: `gbsnap sync <backup-pool> <pool>`
+sends what the backup holds past the newest snapshot the two share, or all of
+it when they share none. `-snapshot <name>` sends that one snapshot instead,
+however old: how a snapshot the pool has already let go of comes back from a
+backup that kept it longer. It goes as a change from the shared snapshot nearest
+to it, where there is one.
+
+`gbsnap restore <volume> [-snapshot <name>]` does the same for a configured
+volume, from the first of its targets that can be reached and holds anything. A
+volume a pattern stands for can be restored before its subvolume is there, or
+after it has gone: restore names it all the same.
+
+A pool being restored into that is not there yet has to be in a place, as any
+other destination does.
 
 ## Concurrent runs
 

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/greendrake/gbsnap/internal/ui"
 )
@@ -321,7 +322,113 @@ func TestFake(t *testing.T) {
 	if _, err := f.Output(ctx, "unscripted"); err == nil {
 		t.Error("unscripted command should fail")
 	}
-	if len(f.Calls) != 3 {
+	f.Script([]string{"tee", "--", "/x/f"}, Reply{})
+	if err := f.Input(ctx, "data\n", "tee", "--", "/x/f"); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.Inputs["tee -- /x/f"]; got != "data\n" {
+		t.Errorf("Inputs = %q", got)
+	}
+	if len(f.Calls) != 4 {
 		t.Errorf("Calls = %v", f.Calls)
+	}
+}
+
+func TestInput(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "written")
+	e := NewExec("", SudoNever, quiet())
+	if err := e.Input(context.Background(), "line one\nline two\n", "tee", "--", path); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "line one\nline two\n" {
+		t.Errorf("wrote %q", got)
+	}
+}
+
+// stubUnreachableSSH puts a stand-in for ssh on PATH that fails the way ssh
+// does when it cannot reach its host.
+func stubUnreachableSSH(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	script := "#!/bin/sh\necho 'ssh: connect to host nas port 22: No route to host' >&2\nexit 255\n"
+	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// A host ssh cannot reach is told apart from a command that ran there and
+// failed, whether the failure comes from resolving sudo or from the command.
+func TestUnreachable(t *testing.T) {
+	stubUnreachableSSH(t)
+	ctx := context.Background()
+
+	_, err := NewExec("nas", SudoAuto, quiet()).Output(ctx, "ls", "/pool")
+	if !Unreachable(err) {
+		t.Errorf("resolving sudo on an unreachable host: %v, want it unreachable", err)
+	}
+	_, err = NewExec("nas", SudoNever, quiet()).Test(ctx, "test", "-d", "/pool")
+	if !Unreachable(err) {
+		t.Errorf("a predicate on an unreachable host: %v, want it unreachable", err)
+	}
+
+	// A local command that happens to exit 255 did run.
+	_, err = NewExec("", SudoNever, quiet()).Output(ctx, "sh", "-c", "exit 255")
+	if err == nil || Unreachable(err) {
+		t.Errorf("a local exit status of 255: %v, want a plain failure", err)
+	}
+}
+
+// Once a local sudo is in use, its cached credentials are refreshed until the
+// runner is closed, and never asked for interactively.
+func TestLocalSudoIsKeptAlive(t *testing.T) {
+	log := stubSudo(t, true)
+	defer func(every time.Duration) { KeepAliveEvery = every }(KeepAliveEvery)
+	KeepAliveEvery = 10 * time.Millisecond
+
+	e := NewExec("", SudoAlways, quiet())
+	if _, err := e.Output(context.Background(), "true"); err != nil {
+		t.Fatal(err)
+	}
+	refreshes := func() int {
+		recorded, _ := os.ReadFile(log)
+		return strings.Count(string(recorded), "-n -v\n")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for refreshes() < 2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if refreshes() < 2 {
+		t.Fatal("sudo's credentials were not refreshed")
+	}
+
+	e.Close()
+	time.Sleep(50 * time.Millisecond) // a refresh already under way may finish
+	after := refreshes()
+	time.Sleep(100 * time.Millisecond)
+	if refreshes() != after {
+		t.Error("sudo was still being refreshed after Close")
+	}
+	e.Close() // closing twice is harmless
+}
+
+// A runner that never used sudo has nothing to keep alive.
+func TestNoKeepAliveWithoutSudo(t *testing.T) {
+	log := stubSudo(t, true)
+	defer func(every time.Duration) { KeepAliveEvery = every }(KeepAliveEvery)
+	KeepAliveEvery = 10 * time.Millisecond
+
+	e := NewExec("", SudoNever, quiet())
+	if _, err := e.Output(context.Background(), "true"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	e.Close()
+	if recorded, _ := os.ReadFile(log); len(recorded) != 0 {
+		t.Errorf("sudo ran without being needed:\n%s", recorded)
 	}
 }

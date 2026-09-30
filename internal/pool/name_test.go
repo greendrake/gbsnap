@@ -188,3 +188,15 @@ func TestNextName(t *testing.T) {
 		t.Errorf("local time gave %q", got)
 	}
 }
+
+func TestSameAndUntagged(t *testing.T) {
+	a, _ := ParseName("20260807T140000Z.2-keep")
+	b, _ := ParseName("20260807T140000Z.2")
+	c, _ := ParseName("20260807T140000Z")
+	if !a.Same(b) || a.Same(c) {
+		t.Errorf("Same: %v %v", a.Same(b), a.Same(c))
+	}
+	if a.Untagged().String() != "20260807T140000Z.2" {
+		t.Errorf("Untagged = %s", a.Untagged())
+	}
+}

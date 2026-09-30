@@ -13,6 +13,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/greendrake/gbsnap/internal/ui"
 )
@@ -26,6 +28,8 @@ type Runner interface {
 	// Test runs a predicate, mapping exit status 0 to true and 1 to false.
 	// Any other exit status is an error.
 	Test(ctx context.Context, argv ...string) (bool, error)
+	// Input runs argv with stdin as its standard input, discarding its output.
+	Input(ctx context.Context, stdin string, argv ...string) error
 	// Pipe runs argv here and streams its standard output into dstArgv on dst,
 	// returning the standard output of dstArgv.
 	Pipe(ctx context.Context, argv []string, dst Runner, dstArgv []string) (string, error)
@@ -73,6 +77,9 @@ type Error struct {
 	Argv   []string
 	Stderr string
 	Err    error
+	// Unreachable is set when ssh itself failed, so that the command never
+	// ran: ssh exits 255 when it cannot connect or log in.
+	Unreachable bool
 }
 
 func (e *Error) Error() string {
@@ -89,6 +96,23 @@ func (e *Error) Error() string {
 
 func (e *Error) Unwrap() error { return e.Err }
 
+// Unreachable reports whether err is ssh failing to reach its host, as opposed
+// to a command that ran there and failed.
+func Unreachable(err error) bool {
+	var e *Error
+	return errors.As(err, &e) && e.Unreachable
+}
+
+// sshFailed is the exit status ssh reserves for its own failures.
+const sshFailed = 255
+
+// failure builds the Error for a command that failed on this runner's host.
+func (e *Exec) failure(argv []string, stderr string, err error) *Error {
+	var exitErr *exec.ExitError
+	unreachable := e.host != "" && errors.As(err, &exitErr) && exitErr.ExitCode() == sshFailed
+	return &Error{Host: e.host, Argv: argv, Stderr: stderr, Err: err, Unreachable: unreachable}
+}
+
 // Exec runs commands on one host, locally or over ssh, optionally under sudo.
 type Exec struct {
 	host     string
@@ -96,11 +120,51 @@ type Exec struct {
 	printer  *ui.Printer
 	resolved *bool // memoised SudoAuto decision
 	checked  bool  // sudo confirmed working
+
+	stopOnce  sync.Once
+	stop      chan struct{} // closed by Close, ending the keep-alive
+	keepAlive bool          // the keep-alive has been started
 }
 
 // NewExec builds a runner for host, empty for the invoking host.
 func NewExec(host string, sudo SudoMode, printer *ui.Printer) *Exec {
-	return &Exec{host: host, sudo: sudo, printer: printer}
+	return &Exec{host: host, sudo: sudo, printer: printer, stop: make(chan struct{})}
+}
+
+// KeepAliveEvery is how often a local sudo's cached credentials are refreshed
+// while gbsnap works. sudo forgets them after five minutes by default.
+var KeepAliveEvery = time.Minute
+
+// startKeepAlive refreshes the local sudo's cached credentials now and then
+// until the runner is closed. One command can outlast sudo's timeout — a first
+// full send can take hours — and the command after it would then ask for a
+// password nobody is there to type. A remote sudo gets no such help: with no
+// terminal to ask on, it has to need no password at all.
+func (e *Exec) startKeepAlive() {
+	if e.host != "" || e.keepAlive {
+		return
+	}
+	e.keepAlive = true
+	go func() {
+		tick := time.NewTicker(KeepAliveEvery)
+		defer tick.Stop()
+		for {
+			select {
+			case <-e.stop:
+				return
+			case <-tick.C:
+				// -n: refresh what is cached, never ask. A refresh that fails
+				// leaves the next command to report sudo's complaint.
+				_ = exec.Command("sudo", "-n", "-v").Run()
+			}
+		}
+	}()
+}
+
+// Close ends the runner's keep-alive, if it has one.
+func (e *Exec) Close() error {
+	e.stopOnce.Do(func() { close(e.stop) })
+	return nil
 }
 
 func (e *Exec) Host() string { return e.host }
@@ -135,11 +199,15 @@ func (e *Exec) useSudo(ctx context.Context) (bool, error) {
 	if !e.checked {
 		argv := []string{"sudo", "true"}
 		if _, err := e.capture(e.prepare(ctx, e.wrap(false, argv)), argv); err != nil {
+			if Unreachable(err) {
+				return false, err
+			}
 			// %v, not %w: the probe's exit status must not reach Test, which
 			// reads an exit status of 1 as a predicate answering false.
 			return false, fmt.Errorf("sudo is needed but does not work: %v", err)
 		}
 		e.checked = true
+		e.startKeepAlive()
 	}
 	return true, nil
 }
@@ -177,7 +245,7 @@ func (e *Exec) capture(cmd *exec.Cmd, argv []string) (string, error) {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
-		return stdout.String(), &Error{Host: e.host, Argv: argv, Stderr: stderr.String(), Err: err}
+		return stdout.String(), e.failure(argv, stderr.String(), err)
 	}
 	return stdout.String(), nil
 }
@@ -192,6 +260,16 @@ func (e *Exec) Output(ctx context.Context, argv ...string) (string, error) {
 
 func (e *Exec) Run(ctx context.Context, argv ...string) error {
 	_, err := e.Output(ctx, argv...)
+	return err
+}
+
+func (e *Exec) Input(ctx context.Context, stdin string, argv ...string) error {
+	cmd, err := e.command(ctx, argv)
+	if err != nil {
+		return err
+	}
+	cmd.Stdin = strings.NewReader(stdin)
+	_, err = e.capture(cmd, argv)
 	return err
 }
 
@@ -256,10 +334,10 @@ func (e *Exec) Pipe(ctx context.Context, argv []string, dst Runner, dstArgv []st
 	// The sender is reported first: when it fails the receiver only ever sees a
 	// truncated stream, and its complaint would bury the real cause.
 	if srcWait != nil {
-		return dstOut.String(), &Error{Host: e.host, Argv: argv, Stderr: srcErr.String(), Err: srcWait}
+		return dstOut.String(), e.failure(argv, srcErr.String(), srcWait)
 	}
 	if sinkWait != nil {
-		return dstOut.String(), &Error{Host: de.host, Argv: dstArgv, Stderr: dstErr.String(), Err: sinkWait}
+		return dstOut.String(), de.failure(dstArgv, dstErr.String(), sinkWait)
 	}
 	return dstOut.String(), nil
 }

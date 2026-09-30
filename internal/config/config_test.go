@@ -1,9 +1,12 @@
 package config
 
 import (
+	"context"
+	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/greendrake/gbsnap/internal/location"
 	"github.com/greendrake/gbsnap/internal/run"
 )
 
@@ -203,5 +206,146 @@ func TestVolumeLookup(t *testing.T) {
 	}
 	if _, err := cfg.Volume("absent"); err == nil {
 		t.Error("expected an error for an unknown volume")
+	}
+}
+
+// fakeLister stands in for the filesystem a pattern is expanded against.
+func fakeLister(found map[string][]string) Lister {
+	return func(ctx context.Context, dir location.Location, sudo run.SudoMode) ([]string, error) {
+		names, ok := found[dir.String()]
+		if !ok {
+			return nil, fmt.Errorf("unexpected directory %s", dir)
+		}
+		return names, nil
+	}
+}
+
+// A pattern stands for every subvolume in its directory, each a volume of its
+// own named after it, and takes its place among the volumes written out.
+func TestPattern(t *testing.T) {
+	cfg, err := parse([]byte(`
+defaults:
+  targets: [nas:/backup]
+volumes:
+  first:
+    pool: /snap/first
+  workspaces:
+    subvolume: /data/ws/*
+    pool: /data/snap/*
+    exclude: [scratch]
+  last:
+    pool: /snap/last
+  mirrored:
+    subvolume: nas:/vms/*
+    pool: nas:/vms/.snap/*
+    targets: [/local/vms/*]
+    sudo: never
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Volumes) != 2 {
+		t.Fatalf("before Expand, only the volumes written out: %+v", cfg.Volumes)
+	}
+	err = cfg.Expand(context.Background(), fakeLister(map[string][]string{
+		"/data/ws": {"wild", "cupla", "scratch"},
+		"nas:/vms": {"db"},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, v := range cfg.Volumes {
+		names = append(names, v.Name)
+	}
+	if got := strings.Join(names, " "); got != "first cupla wild last db" {
+		t.Fatalf("volumes = %q", got)
+	}
+	wild := cfg.Volumes[2]
+	if wild.Subvolume.String() != "/data/ws/wild" || wild.Pool.String() != "/data/snap/wild" {
+		t.Errorf("wild = %v into %v", wild.Subvolume, wild.Pool)
+	}
+	if len(wild.Targets) != 1 || wild.Targets[0].String() != "nas:/backup/wild" {
+		t.Errorf("wild targets = %v", wild.Targets)
+	}
+	db := cfg.Volumes[4]
+	if len(db.Targets) != 1 || db.Targets[0].String() != "/local/vms/db" || db.Sudo != run.SudoNever {
+		t.Errorf("db = %+v", db)
+	}
+
+	// Expanding twice finds nothing more.
+	if err := cfg.Expand(context.Background(), nil); err != nil || len(cfg.Volumes) != 5 {
+		t.Errorf("a second Expand = %v, %d volumes", err, len(cfg.Volumes))
+	}
+}
+
+func TestPatternRejects(t *testing.T) {
+	for name, tc := range map[string]struct{ yaml, want string }{
+		"pool without a *": {
+			"volumes:\n  ws:\n    subvolume: /ws/*\n    pool: /snap\n", "one *",
+		},
+		"target without a *": {
+			"volumes:\n  ws:\n    subvolume: /ws/*\n    pool: /snap/*\n    targets: [nas:/b]\n", "share one pool",
+		},
+		"a * inside the path": {
+			"volumes:\n  ws:\n    subvolume: /ws/*/data/*\n    pool: /snap/*\n", "last element",
+		},
+		"a * outside a pattern": {
+			"volumes:\n  home:\n    pool: /snap/*\n", "belongs to a pattern",
+		},
+		"exclude outside a pattern": {
+			"volumes:\n  home:\n    pool: /snap\n    exclude: [x]\n", "belongs to a pattern",
+		},
+		"exclude in the defaults": {
+			"defaults:\n  exclude: [x]\nvolumes:\n  home:\n    pool: /snap\n", "belong to a volume",
+		},
+		"pattern on two hosts": {
+			"volumes:\n  ws:\n    subvolume: nas:/ws/*\n    pool: /snap/*\n", "different hosts",
+		},
+	} {
+		_, err := parse([]byte(tc.yaml))
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: error %v should mention %q", name, err, tc.want)
+		}
+	}
+
+	// A name found twice, or found that could never be addressed, is refused
+	// when the pattern is expanded.
+	for name, tc := range map[string]struct {
+		found []string
+		want  string
+	}{
+		"clash with a volume written out": {[]string{"home"}, `two volumes are named "home"`},
+		"name no command line can take":   {[]string{"-x"}, `"-x"`},
+	} {
+		cfg, err := parse([]byte("volumes:\n  home:\n    pool: /snap/home\n  ws:\n    subvolume: /ws/*\n    pool: /ws/.snap/*\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = cfg.Expand(context.Background(), fakeLister(map[string][]string{"/ws": tc.found}))
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: Expand = %v, want it to mention %q", name, err, tc.want)
+		}
+	}
+}
+
+// A pattern's volume can be named before its subvolume is there, for restoring.
+func TestAbsent(t *testing.T) {
+	cfg, err := parse([]byte("defaults:\n  targets: [nas:/b]\nvolumes:\n  ws:\n    subvolume: /ws/*\n" +
+		"    pool: /ws/.snap/*\n    exclude: [scratch]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Expand(context.Background(), fakeLister(map[string][]string{"/ws": nil})); err != nil {
+		t.Fatal(err)
+	}
+	v, err := cfg.Absent("gone")
+	if err != nil || v.Pool.String() != "/ws/.snap/gone" || v.Targets[0].String() != "nas:/b/gone" {
+		t.Errorf("Absent(gone) = %+v, %v", v, err)
+	}
+	for _, name := range []string{"scratch", ".hidden", "a/b"} {
+		if _, err := cfg.Absent(name); err == nil {
+			t.Errorf("Absent(%q) should be refused", name)
+		}
 	}
 }

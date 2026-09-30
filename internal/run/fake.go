@@ -21,11 +21,14 @@ type Fake struct {
 	HostName string
 	Replies  map[string]Reply
 	Calls    []string
+	// Inputs holds what each command run with Input was given on stdin, keyed
+	// like Replies; a later run of the same command replaces an earlier one's.
+	Inputs map[string]string
 }
 
 // NewFake builds a fake runner for host, empty for the invoking host.
 func NewFake(host string) *Fake {
-	return &Fake{HostName: host, Replies: map[string]Reply{}}
+	return &Fake{HostName: host, Replies: map[string]Reply{}, Inputs: map[string]string{}}
 }
 
 // Script registers the reply for a command, keyed by its quoted argv.
@@ -58,6 +61,13 @@ func (f *Fake) Output(ctx context.Context, argv ...string) (string, error) {
 
 func (f *Fake) Run(ctx context.Context, argv ...string) error {
 	_, err := f.lookup(Quote(argv))
+	return err
+}
+
+func (f *Fake) Input(ctx context.Context, stdin string, argv ...string) error {
+	key := Quote(argv)
+	f.Inputs[key] = stdin
+	_, err := f.lookup(key)
 	return err
 }
 
