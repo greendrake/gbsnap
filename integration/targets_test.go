@@ -3,74 +3,84 @@
 package integration
 
 import (
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-// A backup disk comes and goes. While it is away its mount point is a bare,
-// unmarked directory: gbsnap skips it rather than filling it, and pruning keeps
-// the snapshot its record says the disk holds, so that the disk's next backup
-// is incremental however much retention moved on meanwhile.
-func TestDiskComesAndGoes(t *testing.T) {
+// Two disks take turns at one mount point. Each is a target of its own, known
+// by the ID gbsnap gives its pool, so while one is away pruning keeps what its
+// next backup builds on, and it gets a change, not everything, when it is back.
+func TestDisksTakingTurns(t *testing.T) {
 	e := setup(t)
 	e.newVolume("first")
-	disk := filepath.Join(e.dst, "disk")      // where the disk is mounted
-	away := filepath.Join(e.dst, "unplugged") // where it sits while away
-	e.sudo("btrfs", "subvolume", "create", disk)
+	disk := filepath.Join(e.dst, "disk") // where either disk is mounted
+	shelf := filepath.Join(e.dst, "shelf")
+	e.sudo("mkdir", shelf)
+	e.sudo("btrfs", "subvolume", "create", disk) // disk A, mounted
 	cfg := e.config("volumes:\n  home:\n" +
 		"    subvolume: " + e.src + "/home\n" +
 		"    pool: " + e.src + "/snap\n" +
 		"    targets: [" + disk + "/home]\n" +
 		"    retention:\n      pool: { min: 1 }\n")
 
-	// Never marked, the disk is offline, and nothing is written to it.
-	out := e.gbsnap(0, "-c", cfg, "run")
-	if !strings.Contains(out, "offline") {
-		t.Errorf("an unmarked target should be offline:\n%s", out)
-	}
-	if _, err := os.Stat(filepath.Join(disk, "home")); !os.IsNotExist(err) {
-		t.Fatal("nothing should have been created on an unmarked target")
-	}
-	e.gbsnap(1, "-c", cfg, "sync", "-reach")
-
-	e.gbsnap(0, "init", disk)
 	e.gbsnap(0, "-c", cfg, "run")
-	sent := e.latest(disk + "/home")
+	sentToA := e.latest(disk + "/home")
+	if id := strings.TrimSpace(e.read(filepath.Join(disk, "home", ".gbsnap-id"))); len(id) != 32 {
+		t.Fatalf("the new pool's ID is %q", id)
+	}
 
-	// The disk is unplugged: its subvolume goes elsewhere, and a bare
-	// directory is left where it was mounted.
-	e.sudo("mv", disk, away)
-	e.sudo("mkdir", disk)
-	for _, content := range []string{"second", "third", "fourth"} {
+	// Disk A goes on the shelf and disk B, new, takes its place.
+	e.sudo("mv", disk, filepath.Join(shelf, "a"))
+	e.sudo("btrfs", "subvolume", "create", disk)
+	for _, content := range []string{"second", "third"} {
 		e.write(content)
 		e.gbsnap(0, "-c", cfg, "run")
 	}
 	var kept bool
 	for _, n := range e.snapshots(e.src + "/snap") {
-		kept = kept || n == sent
+		kept = kept || n == sentToA
 	}
 	if !kept {
-		t.Fatalf("the snapshot the disk holds should have been kept; the pool holds %v", e.snapshots(e.src+"/snap"))
-	}
-	if entries, _ := os.ReadDir(disk); len(entries) != 0 {
-		t.Fatalf("the bare mount point was written to: %v", entries)
-	}
-	out = e.gbsnap(0, "-c", cfg, "status")
-	if !strings.Contains(out, "offline") || !strings.Contains(out, "last received "+sent) {
-		t.Errorf("status should say the disk is offline and what it last received:\n%s", out)
+		t.Fatalf("the snapshot disk A holds should have been kept; the pool holds %v", e.snapshots(e.src+"/snap"))
 	}
 
-	// Plugged back in, the disk gets what it missed as a change.
-	e.sudo("rmdir", disk)
-	e.sudo("mv", away, disk)
-	out = e.gbsnap(0, "-c", cfg, "run")
-	if !strings.Contains(out, "as a change since "+sent) {
-		t.Errorf("the disk's next backup should have been incremental:\n%s", out)
+	// Disk A is back, and gets what it missed as a change.
+	e.sudo("mv", disk, filepath.Join(shelf, "b"))
+	e.sudo("mv", filepath.Join(shelf, "a"), disk)
+	out := e.gbsnap(0, "-c", cfg, "run")
+	if !strings.Contains(out, "as a change since "+sentToA) {
+		t.Errorf("disk A's next backup should have been incremental:\n%s", out)
 	}
-	if got := e.read(filepath.Join(disk, "home", e.latest(disk+"/home"), "file")); got != "fourth" {
-		t.Errorf("the disk holds %q", got)
+	if got := e.read(filepath.Join(disk, "home", e.latest(disk+"/home"), "file")); got != "third" {
+		t.Errorf("disk A holds %q", got)
+	}
+	out = e.gbsnap(0, "-c", cfg, "status")
+	if strings.Count(out, "last received") != 2 {
+		t.Errorf("status should show both disks' records:\n%s", out)
+	}
+}
+
+// Snapshots taken and pruned locally keep what the backup's next send builds
+// on, without reaching the backup at all.
+func TestLocalPruningKeepsWhatTheNextSendNeeds(t *testing.T) {
+	e := setup(t)
+	e.newVolume("first")
+	cfg := e.config("volumes:\n  home:\n" +
+		"    subvolume: " + e.src + "/home\n" +
+		"    pool: " + e.src + "/snap\n" +
+		"    targets: [" + e.dst + "/backup]\n" +
+		"    retention:\n      pool: { min: 1 }\n")
+	e.gbsnap(0, "-c", cfg, "run")
+	sent := e.latest(e.dst + "/backup")
+	for _, content := range []string{"second", "third", "fourth"} {
+		e.write(content)
+		e.gbsnap(0, "-c", cfg, "snap")
+		e.gbsnap(0, "-c", cfg, "prune", "-local")
+	}
+	out := e.gbsnap(0, "-c", cfg, "run")
+	if !strings.Contains(out, "as a change since "+sent) {
+		t.Errorf("the next backup should have been incremental:\n%s", out)
 	}
 }
 
@@ -85,8 +95,6 @@ func TestFetchPrunedSnapshotBack(t *testing.T) {
 		"    pool: " + e.src + "/snap\n" +
 		"    targets: [" + e.dst + "/backup]\n" +
 		"    retention:\n      pool: { min: 1 }\n      target: { min: 5 }\n")
-	e.gbsnap(0, "init", e.dst)
-	e.gbsnap(0, "init", e.src)
 	e.gbsnap(0, "-c", cfg, "run")
 	oldest := e.latest(e.src + "/snap")
 	for _, content := range []string{"b", "c"} {
@@ -123,7 +131,6 @@ func TestUntag(t *testing.T) {
 		"    pool: " + e.src + "/snap\n" +
 		"    targets: [" + e.dst + "/backup]\n" +
 		"    retention:\n      pool: { min: 1 }\n      target: { min: 1 }\n")
-	e.gbsnap(0, "init", e.dst)
 	e.gbsnap(0, "-c", cfg, "snap", "-tag", "keep")
 	tagged := e.latest(e.src + "/snap")
 	e.gbsnap(0, "-c", cfg, "sync")
@@ -171,36 +178,14 @@ func TestPatternFindsSubvolumes(t *testing.T) {
 	}
 }
 
-// Only btrfs can receive a snapshot, so no other filesystem is marked.
-func TestInitRefusesOtherFilesystems(t *testing.T) {
-	e := setup(t)
-	if fs := strings.TrimSpace(e.sh("stat", "-f", "-c", "%T", e.dir)); fs == "btrfs" {
-		t.Skip("the temporary directory is on btrfs")
-	}
-	elsewhere := filepath.Join(e.dir, "elsewhere")
-	if err := os.Mkdir(elsewhere, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	out := e.gbsnap(1, "init", elsewhere)
-	if !strings.Contains(out, "not btrfs") {
-		t.Errorf("output:\n%s", out)
-	}
-}
-
 // A volume a pattern stands for comes back from its backup after its subvolume
-// and its pool have both gone, into a place marked for it.
+// and its pool have both gone.
 func TestRestoreVolumeThatIsGone(t *testing.T) {
 	e := setup(t)
 	ws := filepath.Join(e.src, "ws")
 	e.sudo("mkdir", ws)
 	e.sudo("btrfs", "subvolume", "create", filepath.Join(ws, "one"))
 	e.sudo("sh", "-c", "echo kept > "+filepath.Join(ws, "one", "file"))
-	e.sudo("mkdir", filepath.Join(e.src, "snap"))
-	// An empty plain directory could be a bare mount point, so marking it
-	// takes -force.
-	e.gbsnap(1, "init", filepath.Join(e.src, "snap"))
-	e.gbsnap(0, "init", "-force", filepath.Join(e.src, "snap"))
-	e.gbsnap(0, "init", e.dst)
 	cfg := e.config("defaults:\n  targets: [" + e.dst + "]\nvolumes:\n  ws:\n    subvolume: " + ws +
 		"/*\n    pool: " + e.src + "/snap/*\n")
 	e.gbsnap(0, "-c", cfg, "run")

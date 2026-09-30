@@ -338,7 +338,6 @@ commands:
   status  [<volume>...]           show where each volume stands
   restore <volume>                bring a volume's pool back from its first reachable target
   untag   <volume> <snapshot>     take a snapshot's tag off, here and at its targets
-  init    <dir>                   mark a directory as a place for pools
   forget  <target>                stop keeping snapshots for a target retired for good
   convert [<volume>...]           rename a predecessor's snapshots into gbsnap's naming
   convert <pool>...               the same, for pools named outright
@@ -361,12 +360,11 @@ flags:
 command flags:
   snap  -tag name        tag the new snapshot, protecting it from pruning
         -force           snapshot even if the subvolume is unchanged
-  run   -reach           fail on a target that is offline, rather than skip it
+  run   -reach           fail on a target that cannot be reached, rather than skip it
   sync  -reach           the same
         -snapshot name   send that one snapshot to each target lacking it, however old
   restore -snapshot name bring back that one snapshot, however old
   prune -min n           how many recent snapshots to keep
         -local           prune the volume's own pool alone, reaching no target
-  init  -force           mark an empty directory that is neither a mount point nor a subvolume
 `)
 }

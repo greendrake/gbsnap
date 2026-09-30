@@ -88,31 +88,58 @@ func TestLoadAndSaveRecords(t *testing.T) {
 	}
 }
 
-func TestReadPlace(t *testing.T) {
+func TestID(t *testing.T) {
 	ctx := context.Background()
 	f := run.NewFake("nas").
-		Script([]string{"test", "-f", "/backup/.gbsnap-place"}, run.Reply{}).
-		Script([]string{"cat", "--", "/backup/.gbsnap-place"}, run.Reply{Out: "0123456789abcdef0123456789abcdef\n"}).
-		Script([]string{"test", "-f", "/bare/.gbsnap-place"}, run.Reply{False: true}).
-		Script([]string{"test", "-f", "/odd/.gbsnap-place"}, run.Reply{}).
-		Script([]string{"cat", "--", "/odd/.gbsnap-place"}, run.Reply{Out: "hello\n"})
+		Script([]string{"test", "-d", "/backup/home"}, run.Reply{}).
+		Script([]string{"ls", "-1", "--", "/backup/home"}, run.Reply{}).
+		Script([]string{"test", "-f", "/backup/home/.gbsnap-id"}, run.Reply{}).
+		Script([]string{"cat", "--", "/backup/home/.gbsnap-id"}, run.Reply{Out: "0123456789abcdef0123456789abcdef\n"}).
+		Script([]string{"test", "-d", "/odd"}, run.Reply{}).
+		Script([]string{"ls", "-1", "--", "/odd"}, run.Reply{}).
+		Script([]string{"test", "-f", "/odd/.gbsnap-id"}, run.Reply{}).
+		Script([]string{"cat", "--", "/odd/.gbsnap-id"}, run.Reply{Out: "hello\n"}).
+		Script([]string{"test", "-d", "/new"}, run.Reply{}).
+		Script([]string{"ls", "-1", "--", "/new"}, run.Reply{}).
+		Script([]string{"test", "-f", "/new/.gbsnap-id"}, run.Reply{False: true}).
+		Script([]string{"tee", "--", "/new/.gbsnap-id.new"}, run.Reply{}).
+		Script([]string{"mv", "-T", "--", "/new/.gbsnap-id.new", "/new/.gbsnap-id"}, run.Reply{}).
+		Script([]string{"test", "-d", "/absent"}, run.Reply{False: true})
+	load := func(path string) *Pool {
+		p := New(loc(t, "nas:"+path), f)
+		if err := p.Load(ctx); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
 
-	if id, err := ReadPlace(ctx, f, "/backup"); err != nil || id != "0123456789abcdef0123456789abcdef" {
-		t.Errorf("ReadPlace(/backup) = %q, %v", id, err)
+	if id, err := load("/backup/home").ID(ctx); err != nil || id != "0123456789abcdef0123456789abcdef" {
+		t.Errorf("ID = %q, %v", id, err)
 	}
-	if id, err := ReadPlace(ctx, f, "/bare"); err != nil || id != "" {
-		t.Errorf("ReadPlace(/bare) = %q, %v", id, err)
+	if _, err := load("/odd").ID(ctx); err == nil {
+		t.Error("an ID file holding no ID should be refused")
 	}
-	if _, err := ReadPlace(ctx, f, "/odd"); err == nil {
-		t.Error("a marker holding no ID should be refused")
+	p := load("/new")
+	if id, err := p.ID(ctx); err != nil || id != "" {
+		t.Errorf("ID of a pool without one = %q, %v", id, err)
+	}
+	if err := p.SetID(ctx, "fedcba9876543210fedcba9876543210"); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.Inputs["tee -- /new/.gbsnap-id.new"]; got != "fedcba9876543210fedcba9876543210\n" {
+		t.Errorf("wrote %q", got)
+	}
+	// A pool that is not there has no ID, and nothing is read to find that out.
+	if id, err := load("/absent").ID(ctx); err != nil || id != "" {
+		t.Errorf("ID of a missing pool = %q, %v", id, err)
 	}
 
-	a, err := NewPlaceID()
+	a, err := NewID()
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, _ := NewPlaceID()
-	if !placeIDRe.MatchString(a) || a == b {
+	b, _ := NewID()
+	if !IsID(a) || a == b {
 		t.Errorf("IDs %q and %q", a, b)
 	}
 }

@@ -21,9 +21,7 @@ const RecordsName = ".gbsnap-targets"
 
 // Record is what the pool knows of one target.
 type Record struct {
-	// Target is what the record is keyed by: the ID of the place holding the
-	// target's pool, and the pool's name there. A pool in a place gbsnap init
-	// never marked is keyed by its location instead.
+	// Target is what the record is keyed by: the target pool's ID.
 	Target string `json:"target"`
 	// Location is where the target was last reached.
 	Location string `json:"location"`

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path"
 	"slices"
@@ -53,17 +54,41 @@ func (f *fixture) host(name string) *run.Fake {
 	return r
 }
 
-// pool scripts a pool directory holding the named snapshots, with no records
-// of any target yet, and able to have them written.
+// poolID is the ID of every pool the tests script as having one.
+const poolID = "0123456789abcdef0123456789abcdef"
+
+// pool scripts a pool directory holding the named snapshots, with an ID, and
+// with no records of any target yet, able to have them written.
 func (f *fixture) pool(loc string, entries ...string) {
 	l := parse(f.t, loc)
 	records := path.Join(l.Path, pool.RecordsName)
+	id := path.Join(l.Path, pool.IDName)
 	f.host(l.Host).
 		Script([]string{"test", "-d", l.Path}, run.Reply{}).
 		Script([]string{"ls", "-1", "--", l.Path}, run.Reply{Out: strings.Join(entries, "\n") + "\n"}).
 		Script([]string{"test", "-f", records}, run.Reply{False: true}).
 		Script([]string{"tee", "--", records + ".new"}, run.Reply{}).
-		Script([]string{"mv", "-T", "--", records + ".new", records}, run.Reply{})
+		Script([]string{"mv", "-T", "--", records + ".new", records}, run.Reply{}).
+		Script([]string{"test", "-f", id}, run.Reply{}).
+		Script([]string{"cat", "--", id}, run.Reply{Out: poolID + "\n"})
+}
+
+// unidentified scripts a pool that has no ID yet, and can be given one.
+func (f *fixture) unidentified(loc string) {
+	l := parse(f.t, loc)
+	id := path.Join(l.Path, pool.IDName)
+	f.host(l.Host).
+		Script([]string{"test", "-f", id}, run.Reply{False: true}).
+		Script([]string{"tee", "--", id + ".new"}, run.Reply{}).
+		Script([]string{"mv", "-T", "--", id + ".new", id}, run.Reply{})
+}
+
+// unreachable scripts a pool on a host ssh cannot reach.
+func (f *fixture) unreachable(loc string) {
+	l := parse(f.t, loc)
+	f.host(l.Host).Script([]string{"test", "-d", l.Path}, run.Reply{Err: &run.Error{
+		Host: l.Host, Unreachable: true, Err: errors.New("exit status 255"),
+		Stderr: "ssh: connect to host " + l.Host + " port 22: No route to host"}})
 }
 
 // records scripts what a pool knows of its targets.
@@ -94,27 +119,8 @@ func (f *fixture) saved(loc string) *pool.Records {
 	return rs
 }
 
-// placeID is the ID of every place the tests mark.
-const placeID = "0123456789abcdef0123456789abcdef"
-
-// place scripts a directory gbsnap init marked.
-func (f *fixture) place(loc string) {
-	l := parse(f.t, loc)
-	marker := path.Join(l.Path, pool.PlaceMarker)
-	f.host(l.Host).
-		Script([]string{"test", "-f", marker}, run.Reply{}).
-		Script([]string{"cat", "--", marker}, run.Reply{Out: placeID + "\n"})
-}
-
-// unmarked scripts a directory gbsnap init never marked, or one that is not
-// there at all.
-func (f *fixture) unmarked(loc string) {
-	l := parse(f.t, loc)
-	f.host(l.Host).Script([]string{"test", "-f", path.Join(l.Path, pool.PlaceMarker)}, run.Reply{False: true})
-}
-
 // missingPool scripts a pool directory that is not there, and so holds no
-// records either, though they can be written once it is created.
+// records either, though they, and its ID, can be written once it is created.
 func (f *fixture) missingPool(loc string) {
 	l := parse(f.t, loc)
 	records := path.Join(l.Path, pool.RecordsName)
@@ -122,7 +128,9 @@ func (f *fixture) missingPool(loc string) {
 		Script([]string{"test", "-d", l.Path}, run.Reply{False: true}).
 		Script([]string{"test", "-f", records}, run.Reply{False: true}).
 		Script([]string{"tee", "--", records + ".new"}, run.Reply{}).
-		Script([]string{"mv", "-T", "--", records + ".new", records}, run.Reply{})
+		Script([]string{"mv", "-T", "--", records + ".new", records}, run.Reply{}).
+		Script([]string{"mkdir", "-p", "--", l.Path}, run.Reply{})
+	f.unidentified(loc)
 }
 
 // subvolume scripts what "btrfs subvolume show" reports for a path.
@@ -415,7 +423,6 @@ func TestSyncFullSendToEmptyTarget(t *testing.T) {
 	f := newFixture(t, false)
 	v := volume(t, "/home", "nas:/backup/home")
 	f.pool("/pool/snap/home", "20260807T140000Z")
-	f.place("nas:/backup")
 	f.pool("nas:/backup/home")
 	f.subvolume("/pool/snap/home/20260807T140000Z", shown{uuid: snapUUID, readOnly: true})
 	f.subvolume("nas:/backup/home/20260807T140000Z", shown{
@@ -440,7 +447,6 @@ func TestSyncSendsEveryPendingSnapshot(t *testing.T) {
 	f := newFixture(t, false)
 	v := volume(t, "/home", "nas:/backup/home")
 	f.pool("/pool/snap/home", "20260807T140000Z", "20260807T140100Z", "20260807T140200Z")
-	f.place("nas:/backup")
 	f.pool("nas:/backup/home", "20260807T140000Z")
 
 	for _, n := range []string{"20260807T140000Z", "20260807T140100Z", "20260807T140200Z"} {
@@ -468,7 +474,6 @@ func TestSyncUpToDate(t *testing.T) {
 	f := newFixture(t, false)
 	v := volume(t, "/home", "nas:/backup/home")
 	f.pool("/pool/snap/home", "20260807T140000Z")
-	f.place("nas:/backup")
 	f.pool("nas:/backup/home", "20260807T140000Z")
 
 	if err := f.e.Sync(context.Background(), v, SyncOpts{}); err != nil {
@@ -484,7 +489,6 @@ func TestSyncRefusesDivergedParent(t *testing.T) {
 	f := newFixture(t, false)
 	v := volume(t, "/home", "nas:/backup/home")
 	f.pool("/pool/snap/home", "20260807T140000Z", "20260807T140100Z")
-	f.place("nas:/backup")
 	f.pool("nas:/backup/home", "20260807T140000Z")
 	f.subvolume("/pool/snap/home/20260807T140000Z", shown{uuid: snapUUID, readOnly: true})
 	f.subvolume("nas:/backup/home/20260807T140000Z", shown{
@@ -506,7 +510,6 @@ func TestSyncRefusesUnreceivedParent(t *testing.T) {
 	f := newFixture(t, false)
 	v := volume(t, "/home", "nas:/backup/home")
 	f.pool("/pool/snap/home", "20260807T140000Z", "20260807T140100Z")
-	f.place("nas:/backup")
 	f.pool("nas:/backup/home", "20260807T140000Z")
 	f.subvolume("/pool/snap/home/20260807T140000Z", shown{uuid: snapUUID, readOnly: true})
 	f.subvolume("nas:/backup/home/20260807T140000Z", shown{uuid: snapUUID, readOnly: true})
@@ -522,7 +525,6 @@ func TestSyncRefusesMismatchedArrival(t *testing.T) {
 	f := newFixture(t, false)
 	v := volume(t, "/home", "nas:/backup/home")
 	f.pool("/pool/snap/home", "20260807T140000Z")
-	f.place("nas:/backup")
 	f.pool("nas:/backup/home")
 	f.subvolume("/pool/snap/home/20260807T140000Z", shown{uuid: snapUUID, readOnly: true})
 	f.subvolume("nas:/backup/home/20260807T140000Z", shown{
@@ -548,7 +550,6 @@ func TestSyncRelaysReceivedSnapshot(t *testing.T) {
 	f := newFixture(t, false)
 	v := volume(t, "", "nas:/backup/home")
 	f.pool("/pool/snap/home", "20260807T140000Z")
-	f.place("nas:/backup")
 	f.pool("nas:/backup/home")
 	f.subvolume("/pool/snap/home/20260807T140000Z", shown{
 		uuid: "local-uuid", received: "origin-uuid", readOnly: true})
@@ -569,7 +570,6 @@ func TestSyncContinuesPastAFailedTarget(t *testing.T) {
 	f := newFixture(t, false)
 	v := volume(t, "", "broken:/backup/home", "nas:/backup/home")
 	f.pool("/pool/snap/home", "20260807T140000Z")
-	f.place("nas:/backup")
 	f.missingPool("nas:/backup/home")
 	f.host("nas").Script([]string{"mkdir", "-p", "--", "/backup/home"}, run.Reply{})
 	f.subvolume("/pool/snap/home/20260807T140000Z", shown{uuid: snapUUID, readOnly: true})
@@ -597,7 +597,6 @@ func TestPrune(t *testing.T) {
 	v.Retention.Pool.Min = 2
 	v.Retention.Target.Min = 1
 	f.pool("/pool/snap/home", "20260807T140000Z", "20260807T140100Z", "20260807T140200Z", "20260807T140300Z")
-	f.place("nas:/backup")
 	f.pool("nas:/backup/home", "20260807T140000Z", "20260807T140100Z", "20260807T140200Z")
 	f.host("").Script([]string{"btrfs", "subvolume", "delete", "/pool/snap/home/20260807T140000Z"}, run.Reply{})
 	f.host("nas").Script([]string{"btrfs", "subvolume", "delete", "/backup/home/20260807T140000Z"}, run.Reply{})
@@ -651,7 +650,6 @@ func TestDryRunChangesNothing(t *testing.T) {
 	v := volume(t, "/home", "nas:/backup/home")
 	v.Retention.Pool.Min = 1
 	f.missingPool("/pool/snap/home")
-	f.place("nas:/backup")
 	f.missingPool("nas:/backup/home")
 
 	if err := f.e.Run(context.Background(), v, false); err != nil {
@@ -716,7 +714,6 @@ func TestListAndStatus(t *testing.T) {
 	f := newFixture(t, false)
 	v := volume(t, "/home", "nas:/backup/home")
 	f.pool("/pool/snap/home", "20260807T140000Z", "20260807T140100Z-keep", "20260807T140200Z")
-	f.place("nas:/backup")
 	f.pool("nas:/backup/home", "20260807T140000Z")
 
 	if err := f.e.List(context.Background(), v); err != nil {

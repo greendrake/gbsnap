@@ -7,7 +7,6 @@ import (
 
 	"github.com/greendrake/gbsnap/internal/config"
 	"github.com/greendrake/gbsnap/internal/engine"
-	"github.com/greendrake/gbsnap/internal/location"
 	"github.com/greendrake/gbsnap/internal/pool"
 )
 
@@ -39,7 +38,7 @@ func commands() []*command {
 		name:  "run",
 		usage: "run [<volume>...] [-reach]",
 		flags: func(fs *flag.FlagSet) {
-			fs.BoolVar(&reach, "reach", false, "fail on a target that is offline, rather than skip it")
+			fs.BoolVar(&reach, "reach", false, "fail on a target that cannot be reached, rather than skip it")
 		},
 		run: func(ctx context.Context, a *app, args []string) error {
 			volumes, err := a.volumes(ctx, args)
@@ -75,7 +74,7 @@ func commands() []*command {
 		name:  "sync",
 		usage: "sync [<volume>...] | sync <src-pool> <dst-pool> [-reach] [-snapshot <name>]",
 		flags: func(fs *flag.FlagSet) {
-			fs.BoolVar(&reach, "reach", false, "fail on a target that is offline, rather than skip it")
+			fs.BoolVar(&reach, "reach", false, "fail on a target that cannot be reached, rather than skip it")
 			fs.StringVar(&snapshot, "snapshot", "", "send that one snapshot to each target lacking it, however old")
 		},
 		run: func(ctx context.Context, a *app, args []string) error {
@@ -241,22 +240,6 @@ func commands() []*command {
 			return a.each(ctx, volumes, true, func(ctx context.Context, v *config.Volume) error {
 				return a.engine.Untag(ctx, v, args[1])
 			})
-		},
-	}, {
-		name:  "init",
-		usage: "init <dir> [-force]",
-		flags: func(fs *flag.FlagSet) {
-			fs.BoolVar(&force, "force", false, "mark an empty directory that is neither a mount point nor a subvolume")
-		},
-		run: func(ctx context.Context, a *app, args []string) error {
-			if len(args) != 1 {
-				return usagef("init takes one directory, given %d", len(args))
-			}
-			loc, err := location.Parse(args[0])
-			if err != nil {
-				return usageError{err}
-			}
-			return a.engine.Init(ctx, loc, a.sudo, force)
 		},
 	}, {
 		name:  "forget",

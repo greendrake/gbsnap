@@ -53,15 +53,18 @@ func (s *volumeRun) syncTo(ctx context.Context, loc location.Location, o SyncOpt
 	}
 	if t.offline != "" {
 		if o.Reach {
-			return fmt.Errorf("offline: %s", t.offline)
+			return errors.New(t.offline)
 		}
-		s.e.printer.Action("%s: skipping %s, which is offline: %s", s.v.Name, loc, t.offline)
+		s.e.printer.Action("%s: skipping %s: %s", s.v.Name, loc, t.offline)
 		return nil
 	}
 	if err := s.reconcileTags(ctx, t.pool); err != nil {
 		return err
 	}
 	if err := s.ensure(ctx, t.pool); err != nil {
+		return err
+	}
+	if err := s.identify(ctx, t); err != nil {
 		return err
 	}
 	if o.Snapshot != "" {

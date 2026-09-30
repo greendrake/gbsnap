@@ -2,7 +2,6 @@ package engine
 
 import (
 	"context"
-	"path"
 	"strings"
 	"testing"
 	"time"
@@ -13,8 +12,8 @@ import (
 	"github.com/greendrake/gbsnap/internal/run"
 )
 
-// send scripts the pipe that sends a snapshot from the local pool to nas,
-// as a change from parent unless parent is empty.
+// send scripts the pipe that sends a snapshot from the local pool to nas, as a
+// change from parent unless parent is empty.
 func (f *fixture) send(parent, name string) {
 	argv := []string{"btrfs", "send"}
 	if parent != "" {
@@ -33,81 +32,85 @@ func (f *fixture) copies(names ...string) {
 	}
 }
 
-// A backup disk that is not mounted leaves a bare mount point: no pool there,
-// and no marker. The target is offline, not an empty pool to fill.
-func TestSyncSkipsOfflineTarget(t *testing.T) {
+// A target is taken as written: a pool that is not there is created, given an
+// ID, and sent everything, whatever is or is not mounted there.
+func TestSyncCreatesTargetPool(t *testing.T) {
 	f := newFixture(t, false)
 	v := volume(t, "", "/mnt/disk/home")
 	f.pool("/pool/snap/home", "20260807T140000Z")
-	f.unmarked("/mnt/disk")
 	f.missingPool("/mnt/disk/home")
+	f.subvolume("/pool/snap/home/20260807T140000Z", shown{uuid: "src-0", readOnly: true})
+	f.subvolume("/mnt/disk/home/20260807T140000Z", shown{uuid: "dst-0", received: "src-0", readOnly: true})
+	f.host("").Replies[run.PipeKey(
+		[]string{"btrfs", "send", "/pool/snap/home/20260807T140000Z"},
+		run.NewFake(""),
+		[]string{"btrfs", "receive", "/mnt/disk/home"})] = run.Reply{}
 
 	if err := f.e.Sync(context.Background(), v, SyncOpts{}); err != nil {
 		t.Fatal(err)
 	}
-	f.mustNotRun("", "mkdir")
-	f.mustNotRun("", "btrfs send")
-	if !strings.Contains(f.output(), "skipping /mnt/disk/home, which is offline") {
-		t.Errorf("output = %q", f.output())
+	f.mustRun("", "mkdir -p -- /mnt/disk/home")
+	id := strings.TrimSpace(f.host("").Inputs[run.Quote([]string{"tee", "--", "/mnt/disk/home/.gbsnap-id.new"})])
+	if !pool.IsID(id) {
+		t.Fatalf("the new pool got the ID %q", id)
 	}
-
-	// Asked to reach it, the run fails instead.
-	f = newFixture(t, false)
-	f.pool("/pool/snap/home", "20260807T140000Z")
-	f.unmarked("/mnt/disk")
-	f.missingPool("/mnt/disk/home")
-	err := f.e.Sync(context.Background(), v, SyncOpts{Reach: true})
-	if err == nil || !strings.Contains(err.Error(), "offline") {
-		t.Errorf("Sync with Reach = %v", err)
+	if r, ok := f.saved("/pool/snap/home").Get(id); !ok || r.Snapshot != "20260807T140000Z" {
+		t.Errorf("the send should be recorded under the new pool's ID: %+v", f.saved("/pool/snap/home"))
 	}
 }
 
-// A host ssh cannot reach is offline too.
+// A host ssh cannot reach is skipped, saying what ssh said, since ssh fails
+// alike for a host that is off and one that turns the login away; asked to
+// reach it, the run fails instead.
 func TestSyncSkipsUnreachableHost(t *testing.T) {
 	f := newFixture(t, false)
 	v := volume(t, "", "nas:/backup/home")
 	f.pool("/pool/snap/home", "20260807T140000Z")
-	f.host("nas").Script([]string{"test", "-f", "/backup/" + pool.PlaceMarker},
-		run.Reply{Err: &run.Error{Host: "nas", Unreachable: true, Err: context.DeadlineExceeded,
-			Stderr: "user@nas: Permission denied (publickey)."}})
+	f.unreachable("nas:/backup/home")
 
 	if err := f.e.Sync(context.Background(), v, SyncOpts{}); err != nil {
 		t.Fatal(err)
 	}
-	// ssh fails alike for a host that is off and one that turns the login
-	// away, so what ssh said is passed on.
-	if !strings.Contains(f.output(), "nas cannot be reached") || !strings.Contains(f.output(), "Permission denied") {
+	if !strings.Contains(f.output(), "nas cannot be reached") || !strings.Contains(f.output(), "No route to host") {
 		t.Errorf("output = %q", f.output())
+	}
+	f.mustNotRun("", "btrfs send")
+
+	f = newFixture(t, false)
+	f.pool("/pool/snap/home", "20260807T140000Z")
+	f.unreachable("nas:/backup/home")
+	err := f.e.Sync(context.Background(), v, SyncOpts{Reach: true})
+	if err == nil || !strings.Contains(err.Error(), "cannot be reached") {
+		t.Errorf("Sync with Reach = %v", err)
 	}
 }
 
-// A pool made before places were marked keeps working where it is, known by
-// its location.
-func TestSyncToPoolInUnmarkedPlace(t *testing.T) {
+// A pool without an ID, made by hand or by an earlier version, is given one
+// when next sent to, and the send recorded under it.
+func TestSyncGivesPoolAnID(t *testing.T) {
 	f := newFixture(t, false)
 	v := volume(t, "", "nas:/backup/home")
 	f.pool("/pool/snap/home", "20260807T140000Z", "20260807T140100Z")
-	f.unmarked("nas:/backup")
 	f.pool("nas:/backup/home", "20260807T140000Z")
+	f.unidentified("nas:/backup/home")
 	f.copies("20260807T140000Z", "20260807T140100Z")
 	f.send("20260807T140000Z", "20260807T140100Z")
 
 	if err := f.e.Sync(context.Background(), v, SyncOpts{}); err != nil {
 		t.Fatal(err)
 	}
-	rs := f.saved("/pool/snap/home")
-	if r, ok := rs.Get("nas:/backup/home"); !ok || r.Snapshot != "20260807T140100Z" {
-		t.Errorf("records = %+v", rs)
+	id := strings.TrimSpace(f.host("nas").Inputs[run.Quote([]string{"tee", "--", "/backup/home/.gbsnap-id.new"})])
+	if r, ok := f.saved("/pool/snap/home").Get(id); !pool.IsID(id) || !ok || r.Snapshot != "20260807T140100Z" {
+		t.Errorf("ID %q, records %+v", id, f.saved("/pool/snap/home"))
 	}
 }
 
-// Each send is recorded, keyed by the place's ID, with the newest snapshot the
-// target now shares.
+// Each send is recorded, keyed by the target pool's ID, with the newest
+// snapshot the target now shares.
 func TestSyncRecordsWhatTheTargetHolds(t *testing.T) {
 	f := newFixture(t, false)
 	v := volume(t, "", "nas:/backup/home")
 	f.pool("/pool/snap/home", "20260807T140000Z", "20260807T140100Z")
-	f.place("nas:/backup")
 	f.pool("nas:/backup/home", "20260807T140000Z")
 	f.copies("20260807T140000Z", "20260807T140100Z")
 	f.send("20260807T140000Z", "20260807T140100Z")
@@ -115,26 +118,48 @@ func TestSyncRecordsWhatTheTargetHolds(t *testing.T) {
 	if err := f.e.Sync(context.Background(), v, SyncOpts{}); err != nil {
 		t.Fatal(err)
 	}
-	r, ok := f.saved("/pool/snap/home").Get(placeID + "/home")
+	r, ok := f.saved("/pool/snap/home").Get(poolID)
 	if !ok || r.Snapshot != "20260807T140100Z" || r.Location != "nas:/backup/home" {
 		t.Errorf("record = %+v, %v", r, ok)
 	}
 	if !r.Since.Equal(f.e.now()) {
 		t.Errorf("since = %v", r.Since)
 	}
+	f.mustNotRun("nas", "tee") // the pool had its ID already
 }
 
-// While a target is offline, pruning keeps the snapshot its record names,
-// however far retention has moved on, so its next send can build on it.
-func TestPruneKeepsWhatAnOfflineTargetNeeds(t *testing.T) {
+// While a target cannot be reached, pruning keeps the snapshot its record
+// names, however far retention has moved on, so its next send can build on it.
+func TestPruneKeepsWhatAnUnreachableTargetNeeds(t *testing.T) {
 	f := newFixture(t, false)
-	v := volume(t, "", "/mnt/disk/home")
+	v := volume(t, "", "nas:/backup/home")
 	v.Retention.Pool.Min = 1
 	f.pool("/pool/snap/home", "20260807T140000Z", "20260807T140100Z", "20260807T140200Z")
 	f.records("/pool/snap/home", pool.Record{
-		Target: placeID + "/home", Location: "/mnt/disk/home", Snapshot: "20260807T140000Z"})
-	f.unmarked("/mnt/disk")
-	f.missingPool("/mnt/disk/home")
+		Target: poolID, Location: "nas:/backup/home", Snapshot: "20260807T140000Z"})
+	f.unreachable("nas:/backup/home")
+	f.host("").Script([]string{"btrfs", "subvolume", "delete", "/pool/snap/home/20260807T140100Z"}, run.Reply{})
+
+	if err := f.e.Prune(context.Background(), v, PruneOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	f.mustRun("", "subvolume delete /pool/snap/home/20260807T140100Z")
+	f.mustNotRun("", "subvolume delete /pool/snap/home/20260807T140000Z")
+}
+
+// Two disks taking turns at one mount point are two targets: the one there now
+// is reached and pruned with, and the other's record still keeps what it
+// needs.
+func TestPruneKeepsWhatTheDiskAwayNeeds(t *testing.T) {
+	other := "fedcba9876543210fedcba9876543210"
+	f := newFixture(t, false)
+	v := volume(t, "", "/mnt/disk/home")
+	v.Retention.Pool.Min = 1
+	f.pool("/pool/snap/home", "20260807T140000Z", "20260807T140100Z", "20260807T140200Z", "20260807T140300Z")
+	f.records("/pool/snap/home",
+		pool.Record{Target: other, Location: "/mnt/disk/home", Snapshot: "20260807T140000Z"},
+		pool.Record{Target: poolID, Location: "/mnt/disk/home", Snapshot: "20260807T140200Z"})
+	f.pool("/mnt/disk/home", "20260807T140200Z")
 	f.host("").Script([]string{"btrfs", "subvolume", "delete", "/pool/snap/home/20260807T140100Z"}, run.Reply{})
 
 	if err := f.e.Prune(context.Background(), v, PruneOpts{}); err != nil {
@@ -151,7 +176,7 @@ func TestPruneLocal(t *testing.T) {
 	v.Retention.Pool.Min = 1
 	f.pool("/pool/snap/home", "20260807T140000Z", "20260807T140100Z", "20260807T140200Z")
 	f.records("/pool/snap/home", pool.Record{
-		Target: placeID + "/home", Location: "nas:/backup/home", Snapshot: "20260807T140100Z"})
+		Target: poolID, Location: "nas:/backup/home", Snapshot: "20260807T140100Z"})
 	f.host("").Script([]string{"btrfs", "subvolume", "delete", "/pool/snap/home/20260807T140000Z"}, run.Reply{})
 
 	if err := f.e.Prune(context.Background(), v, PruneOpts{Local: true}); err != nil {
@@ -172,8 +197,7 @@ func TestPruneDropsRecordOfTargetSharingNothing(t *testing.T) {
 	v.Retention.Pool.Min = 1
 	f.pool("/pool/snap/home", "20260807T140000Z", "20260807T140100Z")
 	f.records("/pool/snap/home", pool.Record{
-		Target: placeID + "/home", Location: "nas:/backup/home", Snapshot: "20260807T140000Z"})
-	f.place("nas:/backup")
+		Target: poolID, Location: "nas:/backup/home", Snapshot: "20260807T140000Z"})
 	f.pool("nas:/backup/home")
 	f.host("").Script([]string{"btrfs", "subvolume", "delete", "/pool/snap/home/20260807T140000Z"}, run.Reply{})
 
@@ -192,7 +216,6 @@ func TestFetchOlderSnapshot(t *testing.T) {
 	f := newFixture(t, false)
 	v := volume(t, "", "nas:/backup/home")
 	f.pool("/pool/snap/home", "20260807T140000Z", "20260807T140100Z", "20260807T140200Z")
-	f.place("nas:/backup")
 	f.pool("nas:/backup/home", "20260807T140200Z")
 	f.copies("20260807T140000Z", "20260807T140200Z")
 	f.send("20260807T140200Z", "20260807T140000Z")
@@ -253,7 +276,6 @@ func TestRestoreBuildsOnTheOriginal(t *testing.T) {
 	f := newFixture(t, false)
 	v := volume(t, "", "nas:/backup/home")
 	f.pool("/pool/snap/home", "20260807T140000Z", "20260807T140100Z")
-	f.place("nas:/backup")
 	f.pool("nas:/backup/home", "20260807T140000Z")
 	// The pool is the backup here: its copies were received from the
 	// destination's originals.
@@ -270,13 +292,11 @@ func TestRestoreBuildsOnTheOriginal(t *testing.T) {
 }
 
 // A tag taken off in the pool is taken off the target's copy when the two next
-// meet, so that they are paired again, but only once the UUID check has
-// confirmed the copy is one.
+// meet, but only once the UUID check has confirmed the copy is one.
 func TestSyncFollowsTagChanges(t *testing.T) {
 	f := newFixture(t, false)
 	v := volume(t, "", "nas:/backup/home")
 	f.pool("/pool/snap/home", "20260807T140000Z")
-	f.place("nas:/backup")
 	f.pool("nas:/backup/home", "20260807T140000Z-keep")
 	f.subvolume("/pool/snap/home/20260807T140000Z", shown{uuid: "src-0", readOnly: true})
 	f.subvolume("nas:/backup/home/20260807T140000Z-keep", shown{uuid: "dst-0", received: "src-0", readOnly: true})
@@ -292,7 +312,6 @@ func TestSyncFollowsTagChanges(t *testing.T) {
 	// A stray that is not a copy keeps its name, and the sync stops there.
 	f = newFixture(t, false)
 	f.pool("/pool/snap/home", "20260807T140000Z")
-	f.place("nas:/backup")
 	f.pool("nas:/backup/home", "20260807T140000Z-keep")
 	f.subvolume("/pool/snap/home/20260807T140000Z", shown{uuid: "src-0", readOnly: true})
 	f.subvolume("nas:/backup/home/20260807T140000Z-keep", shown{uuid: "dst-0", received: "other", readOnly: true})
@@ -310,7 +329,6 @@ func TestRestoreLeavesUntaggedAlone(t *testing.T) {
 		f := newFixture(t, false)
 		v := config.AdHoc(parse(t, "nas:/backup/home"), []location.Location{parse(t, "/pool/snap/home")}, 3, run.SudoAuto)
 		f.pool("nas:/backup/home", "20260807T140000Z", "20260807T140100Z-keep")
-		f.place("/pool/snap")
 		f.pool("/pool/snap/home", "20260807T140000Z", "20260807T140100Z")
 		return f, v
 	}
@@ -337,7 +355,6 @@ func TestBuildOnParentUnderAnotherTag(t *testing.T) {
 	f := newFixture(t, false)
 	v := volume(t, "", "nas:/backup/home")
 	f.pool("/pool/snap/home", "20260807T140000Z-keep", "20260807T140100Z")
-	f.place("nas:/backup")
 	f.pool("nas:/backup/home", "20260807T140000Z")
 	f.subvolume("/pool/snap/home/20260807T140000Z-keep", shown{uuid: "src-0", readOnly: true})
 	f.subvolume("nas:/backup/home/20260807T140000Z", shown{uuid: "dst-0", received: "src-0", readOnly: true})
@@ -353,30 +370,28 @@ func TestBuildOnParentUnderAnotherTag(t *testing.T) {
 
 func TestUntag(t *testing.T) {
 	f := newFixture(t, false)
-	v := volume(t, "", "nas:/backup/home", "/mnt/disk/home")
+	v := volume(t, "", "nas:/backup/home", "usb:/disk/home")
 	f.pool("/pool/snap/home", "20260807T140000Z-keep", "20260807T140100Z")
 	f.records("/pool/snap/home", pool.Record{
-		Target: placeID + "/home", Location: "/mnt/disk/home", Snapshot: "20260807T140000Z-keep"})
+		Target: poolID, Location: "usb:/disk/home", Snapshot: "20260807T140000Z-keep"})
 	f.host("").Script([]string{"mv", "-T", "--",
 		"/pool/snap/home/20260807T140000Z-keep", "/pool/snap/home/20260807T140000Z"}, run.Reply{})
-	f.place("nas:/backup")
 	f.pool("nas:/backup/home", "20260807T140000Z-keep")
 	f.subvolume("/pool/snap/home/20260807T140000Z", shown{uuid: "src-0", readOnly: true})
 	f.subvolume("nas:/backup/home/20260807T140000Z-keep", shown{uuid: "dst-0", received: "src-0", readOnly: true})
 	f.host("nas").Script([]string{"mv", "-T", "--",
 		"/backup/home/20260807T140000Z-keep", "/backup/home/20260807T140000Z"}, run.Reply{})
-	f.unmarked("/mnt/disk")
-	f.missingPool("/mnt/disk/home")
+	f.unreachable("usb:/disk/home")
 
 	if err := f.e.Untag(context.Background(), v, "20260807T140000Z-keep"); err != nil {
 		t.Fatal(err)
 	}
 	f.mustRun("", "mv -T -- /pool/snap/home/20260807T140000Z-keep /pool/snap/home/20260807T140000Z")
 	f.mustRun("nas", "mv -T -- /backup/home/20260807T140000Z-keep /backup/home/20260807T140000Z")
-	if r, _ := f.saved("/pool/snap/home").Get(placeID + "/home"); r.Snapshot != "20260807T140000Z" {
+	if r, _ := f.saved("/pool/snap/home").Get(poolID); r.Snapshot != "20260807T140000Z" {
 		t.Errorf("the record should follow the rename, got %+v", r)
 	}
-	if !strings.Contains(f.output(), "/mnt/disk/home is offline") {
+	if !strings.Contains(f.output(), "usb:/disk/home is offline") {
 		t.Errorf("output = %q", f.output())
 	}
 
@@ -390,133 +405,49 @@ func TestUntag(t *testing.T) {
 }
 
 func TestForget(t *testing.T) {
-	f := newFixture(t, false)
+	other := "fedcba9876543210fedcba9876543210"
 	v := volume(t, "")
+
+	f := newFixture(t, false)
 	f.pool("/pool/snap/home", "20260807T140000Z")
 	f.records("/pool/snap/home",
-		pool.Record{Target: placeID + "/home", Location: "/mnt/disk/home", Snapshot: "20260807T140000Z"},
-		pool.Record{Target: "nas:/backup/home", Location: "nas:/backup/home", Snapshot: "20260807T140000Z"})
-
-	// The place a target was in names it as well as its pool does.
+		pool.Record{Target: poolID, Location: "/mnt/disk/home", Snapshot: "20260807T140000Z"},
+		pool.Record{Target: other, Location: "nas:/backup/home", Snapshot: "20260807T140000Z"})
+	// The directory a target was in names it as well as its pool does.
 	n, err := f.e.Forget(context.Background(), v, "/mnt/disk")
 	if err != nil || n != 1 {
 		t.Fatalf("Forget = %d, %v", n, err)
 	}
-	rs := f.saved("/pool/snap/home")
-	if len(rs.List) != 1 || rs.List[0].Target != "nas:/backup/home" {
+	if rs := f.saved("/pool/snap/home"); len(rs.List) != 1 || rs.List[0].Target != other {
 		t.Errorf("records = %+v", rs)
 	}
 
 	f = newFixture(t, false)
 	f.pool("/pool/snap/home", "20260807T140000Z")
-	f.records("/pool/snap/home", pool.Record{Target: placeID + "/home", Location: "/mnt/disk/home"})
-	if n, err := f.e.Forget(context.Background(), v, placeID); err != nil || n != 1 {
-		t.Errorf("Forget by place ID = %d, %v", n, err)
+	f.records("/pool/snap/home", pool.Record{Target: poolID, Location: "/mnt/disk/home"})
+	if n, err := f.e.Forget(context.Background(), v, poolID); err != nil || n != 1 {
+		t.Errorf("Forget by ID = %d, %v", n, err)
 	}
 	if n, err := f.e.Forget(context.Background(), v, "/elsewhere"); err != nil || n != 0 {
 		t.Errorf("Forget of a target never recorded = %d, %v", n, err)
 	}
 
 	// Two disks took turns at one mount point: where they were names both, so
-	// only a key will do.
-	other := "fedcba9876543210fedcba9876543210"
+	// only an ID will do.
 	f = newFixture(t, false)
 	f.pool("/pool/snap/home", "20260807T140000Z")
 	f.records("/pool/snap/home",
-		pool.Record{Target: placeID + "/home", Location: "/mnt/disk/home"},
-		pool.Record{Target: other + "/home", Location: "/mnt/disk/home"})
+		pool.Record{Target: poolID, Location: "/mnt/disk/home"},
+		pool.Record{Target: other, Location: "/mnt/disk/home"})
 	if _, err := f.e.Forget(context.Background(), v, "/mnt/disk"); err == nil || !strings.Contains(err.Error(), other) {
 		t.Errorf("Forget of a place two targets shared = %v", err)
 	}
-	if n, err := f.e.Forget(context.Background(), v, other+"/home"); err != nil || n != 1 {
-		t.Errorf("Forget by key = %d, %v", n, err)
+	if n, err := f.e.Forget(context.Background(), v, other); err != nil || n != 1 {
+		t.Errorf("Forget by ID = %d, %v", n, err)
 	}
-	if rs := f.saved("/pool/snap/home"); len(rs.List) != 1 || rs.List[0].Target != placeID+"/home" {
+	if rs := f.saved("/pool/snap/home"); len(rs.List) != 1 || rs.List[0].Target != poolID {
 		t.Errorf("records = %+v", rs)
 	}
-
-	// A path is never taken for the start of a key.
-	f = newFixture(t, false)
-	f.pool("/pool/snap/home", "20260807T140000Z")
-	f.records("/pool/snap/home", pool.Record{Target: "/mnt/disk/home", Location: "/mnt/disk/home"})
-	if n, err := f.e.Forget(context.Background(), v, "/mnt"); err != nil || n != 0 {
-		t.Errorf("Forget /mnt = %d, %v", n, err)
-	}
-}
-
-// placeProbe scripts what init reads of a directory before marking it.
-func (f *fixture) placeProbe(host, dir, fs, devs, entries string) {
-	marker := path.Join(dir, pool.PlaceMarker)
-	f.host(host).
-		Script([]string{"test", "-f", marker}, run.Reply{False: true}).
-		Script([]string{"test", "-d", dir}, run.Reply{}).
-		Script([]string{"stat", "-f", "-c", "%T", "--", dir}, run.Reply{Out: fs + "\n"}).
-		Script([]string{"stat", "-c", "%d", "--", dir, path.Join(dir, "..")}, run.Reply{Out: devs}).
-		Script([]string{"ls", "-A", "--", dir}, run.Reply{Out: entries}).
-		Script([]string{"tee", "--", marker + ".new"}, run.Reply{}).
-		Script([]string{"mv", "-T", "--", marker + ".new", marker}, run.Reply{})
-}
-
-func TestInit(t *testing.T) {
-	// A disk's mount point, a device of its own: marked, with a new ID.
-	f := newFixture(t, false)
-	f.placeProbe("nas", "/backup", "btrfs", "41\n40\n", "")
-	if err := f.e.Init(context.Background(), location.Location{Host: "nas", Path: "/backup"}, run.SudoAuto, false); err != nil {
-		t.Fatal(err)
-	}
-	marker := "/backup/" + pool.PlaceMarker
-	id := strings.TrimSpace(f.host("nas").Inputs[run.Quote([]string{"tee", "--", marker + ".new"})])
-	if len(id) != 32 || !strings.Contains(f.output(), id) {
-		t.Errorf("marker holds %q; output %q", id, f.output())
-	}
-	f.mustNotRun("nas", "mkdir")
-
-	// An empty directory on the filesystem holding it is what a disk that is
-	// not mounted leaves: refused, unless forced.
-	f = newFixture(t, false)
-	f.placeProbe("", "/mnt/disk", "btrfs", "40\n40\n", "")
-	err := f.e.Init(context.Background(), location.Location{Path: "/mnt/disk"}, run.SudoAuto, false)
-	if err == nil || !strings.Contains(err.Error(), "mount it first") {
-		t.Errorf("Init of a bare mount point = %v", err)
-	}
-	f.mustNotRun("", "tee")
-	if err := f.e.Init(context.Background(), location.Location{Path: "/mnt/disk"}, run.SudoAuto, true); err != nil {
-		t.Errorf("Init -force = %v", err)
-	}
-	f.mustRun("", "tee")
-
-	// A directory with something in it is no bare mount point.
-	f = newFixture(t, false)
-	f.placeProbe("", "/srv/backup", "btrfs", "40\n40\n", "home\n")
-	if err := f.e.Init(context.Background(), location.Location{Path: "/srv/backup"}, run.SudoAuto, false); err != nil {
-		t.Errorf("Init of a directory already in use = %v", err)
-	}
-
-	// Anywhere but btrfs, a place could never hold a pool.
-	f = newFixture(t, false)
-	f.placeProbe("", "/mnt", "ext2/ext3", "40\n41\n", "")
-	err = f.e.Init(context.Background(), location.Location{Path: "/mnt"}, run.SudoAuto, false)
-	if err == nil || !strings.Contains(err.Error(), "not btrfs") {
-		t.Errorf("Init on ext4 = %v", err)
-	}
-
-	// Nor is any directory made.
-	f = newFixture(t, false)
-	f.host("").
-		Script([]string{"test", "-f", "/absent/" + pool.PlaceMarker}, run.Reply{False: true}).
-		Script([]string{"test", "-d", "/absent"}, run.Reply{False: true})
-	err = f.e.Init(context.Background(), location.Location{Path: "/absent"}, run.SudoAuto, false)
-	if err == nil || !strings.Contains(err.Error(), "not a directory") {
-		t.Errorf("Init of a missing directory = %v", err)
-	}
-
-	// A place already marked keeps its ID.
-	f = newFixture(t, false)
-	f.place("/backup")
-	if err := f.e.Init(context.Background(), location.Location{Path: "/backup"}, run.SudoAuto, false); err != nil {
-		t.Fatal(err)
-	}
-	f.mustNotRun("", "tee")
 }
 
 func TestSubvolumes(t *testing.T) {
@@ -537,25 +468,26 @@ func TestSubvolumes(t *testing.T) {
 	}
 }
 
-// Status says when each target last received, which targets are offline, and
-// which targets the pool still keeps a snapshot for though none is configured.
+// Status says when each target last received, which targets are offline (with
+// the record's ID, which forget takes), and which targets the pool still keeps
+// a snapshot for though none is configured.
 func TestStatusReportsRecords(t *testing.T) {
 	f := newFixture(t, false)
-	v := volume(t, "", "/mnt/disk/home")
+	v := volume(t, "", "nas:/backup/home")
 	f.pool("/pool/snap/home", "20260807T140000Z")
 	since := time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)
+	other := "fedcba9876543210fedcba9876543210"
 	f.records("/pool/snap/home",
-		pool.Record{Target: placeID + "/home", Location: "/mnt/disk/home", Snapshot: "20260807T140000Z", Since: since},
-		pool.Record{Target: "old:/b/home", Location: "old:/b/home", Snapshot: "20260807T140000Z", Since: since})
-	f.unmarked("/mnt/disk")
-	f.missingPool("/mnt/disk/home")
+		pool.Record{Target: poolID, Location: "nas:/backup/home", Snapshot: "20260807T140000Z", Since: since},
+		pool.Record{Target: other, Location: "old:/b/home", Snapshot: "20260807T140000Z", Since: since})
+	f.unreachable("nas:/backup/home")
 
 	if err := f.e.Status(context.Background(), v); err != nil {
 		t.Fatal(err)
 	}
 	out := f.output()
-	for _, want := range []string{"offline", "last received 20260807T140000Z", "record " + placeID + "/home",
-		"old:/b/home", "gbsnap forget old:/b/home"} {
+	for _, want := range []string{"offline", "last received 20260807T140000Z", "record " + poolID,
+		"old:/b/home", "gbsnap forget " + other} {
 		if !strings.Contains(out, want) {
 			t.Errorf("status should mention %q:\n%s", want, out)
 		}
@@ -563,16 +495,14 @@ func TestStatusReportsRecords(t *testing.T) {
 }
 
 // Restoring brings the pool back from the first target that can be reached and
-// holds anything, sent from there into the pool.
+// holds anything, sent from there into the pool, and writes nothing at the
+// source.
 func TestRestore(t *testing.T) {
 	f := newFixture(t, false)
-	v := volume(t, "/home", "/mnt/disk/home", "nas:/backup/home")
+	v := volume(t, "/home", "usb:/disk/home", "nas:/backup/home")
 	f.pool("/pool/snap/home", "20260807T140200Z")
-	f.unmarked("/mnt/disk")
-	f.missingPool("/mnt/disk/home")
-	f.place("nas:/backup")
+	f.unreachable("usb:/disk/home")
 	f.pool("nas:/backup/home", "20260807T140000Z", "20260807T140200Z")
-	f.place("/pool/snap")
 	f.subvolume("nas:/backup/home/20260807T140200Z", shown{uuid: "copy-2", received: "orig-2", readOnly: true})
 	f.subvolume("/pool/snap/home/20260807T140200Z", shown{uuid: "orig-2", readOnly: true})
 	f.subvolume("nas:/backup/home/20260807T140000Z", shown{uuid: "copy-0", received: "orig-0", readOnly: true})
@@ -586,7 +516,6 @@ func TestRestore(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.mustRun("nas", "send -p /backup/home/20260807T140200Z /backup/home/20260807T140000Z | [local] btrfs receive /pool/snap/home")
-	// The source of a send, here the backup, is never written to.
 	f.mustNotRun("nas", "tee")
 	f.mustNotRun("", "tee")
 
@@ -594,11 +523,8 @@ func TestRestore(t *testing.T) {
 	f = newFixture(t, false)
 	v2 := volume(t, "/home", "nas:/backup/home", "/mnt/disk/home")
 	f.pool("/pool/snap/home", "20260807T140200Z")
-	f.place("nas:/backup")
 	f.pool("nas:/backup/home", "20260807T140200Z")
-	f.place("/mnt/disk")
 	f.pool("/mnt/disk/home", "20260807T140000Z", "20260807T140200Z")
-	f.place("/pool/snap")
 	f.subvolume("/mnt/disk/home/20260807T140200Z", shown{uuid: "copy-2", received: "orig-2", readOnly: true})
 	f.subvolume("/pool/snap/home/20260807T140200Z", shown{uuid: "orig-2", readOnly: true})
 	f.subvolume("/mnt/disk/home/20260807T140000Z", shown{uuid: "copy-0", received: "orig-0", readOnly: true})
@@ -615,12 +541,66 @@ func TestRestore(t *testing.T) {
 	// With no target to be had, it says why.
 	f = newFixture(t, false)
 	f.pool("/pool/snap/home")
-	f.unmarked("/mnt/disk")
-	f.missingPool("/mnt/disk/home")
-	f.place("nas:/backup")
+	f.unreachable("usb:/disk/home")
 	f.pool("nas:/backup/home")
 	err := f.e.Restore(context.Background(), v, "")
-	if err == nil || !strings.Contains(err.Error(), "offline") || !strings.Contains(err.Error(), "holds no snapshots") {
+	if err == nil || !strings.Contains(err.Error(), "cannot be reached") || !strings.Contains(err.Error(), "holds no snapshots") {
 		t.Errorf("Restore = %v", err)
 	}
+}
+
+// A pool gbsnap 0.2.0 sent to has no ID and a record keyed another way: the
+// record is carried over to the ID the pool gets, rather than left to linger.
+func TestRecordFrom020IsCarriedOver(t *testing.T) {
+	f := newFixture(t, false)
+	v := volume(t, "", "nas:/backup/home")
+	f.pool("/pool/snap/home", "20260807T140000Z")
+	f.records("/pool/snap/home",
+		pool.Record{Target: "0123456789abcdef0123456789abcdef/home", Location: "nas:/backup/home", Snapshot: "20260807T140000Z"})
+	f.pool("nas:/backup/home", "20260807T140000Z")
+	f.unidentified("nas:/backup/home")
+
+	if err := f.e.Sync(context.Background(), v, SyncOpts{}); err != nil {
+		t.Fatal(err)
+	}
+	id := strings.TrimSpace(f.host("nas").Inputs[run.Quote([]string{"tee", "--", "/backup/home/.gbsnap-id.new"})])
+	rs := f.saved("/pool/snap/home")
+	if len(rs.List) != 1 || rs.List[0].Target != id || rs.List[0].Snapshot != "20260807T140000Z" {
+		t.Errorf("ID %s, records %+v", id, rs)
+	}
+}
+
+// A pool made at the location while the one a 0.2.0 record is about is away
+// holds nothing of it, and the record stays to keep what that one needs.
+func TestRecordFrom020StaysForThePoolAway(t *testing.T) {
+	f := newFixture(t, false)
+	v := volume(t, "", "/mnt/disk/home")
+	v.Retention.Pool.Min = 1
+	earlier := "0123456789abcdef0123456789abcdef/home"
+	f.pool("/pool/snap/home", "20260807T140000Z", "20260807T140100Z", "20260807T140200Z")
+	f.records("/pool/snap/home",
+		pool.Record{Target: earlier, Location: "/mnt/disk/home", Snapshot: "20260807T140000Z"})
+	f.missingPool("/mnt/disk/home")
+	for _, n := range []string{"20260807T140000Z", "20260807T140100Z", "20260807T140200Z"} {
+		f.subvolume("/pool/snap/home/"+n, shown{uuid: "src-" + n, readOnly: true})
+		f.subvolume("/mnt/disk/home/"+n, shown{uuid: "dst-" + n, received: "src-" + n, readOnly: true})
+	}
+	for _, step := range [][2]string{{"", "20260807T140000Z"}, {"20260807T140000Z", "20260807T140100Z"},
+		{"20260807T140100Z", "20260807T140200Z"}} {
+		argv := []string{"btrfs", "send"}
+		if step[0] != "" {
+			argv = append(argv, "-p", "/pool/snap/home/"+step[0])
+		}
+		argv = append(argv, "/pool/snap/home/"+step[1])
+		f.host("").Replies[run.PipeKey(argv, run.NewFake(""), []string{"btrfs", "receive", "/mnt/disk/home"})] = run.Reply{}
+	}
+
+	if err := f.e.Run(context.Background(), v, false); err != nil {
+		t.Fatal(err)
+	}
+	rs := f.saved("/pool/snap/home")
+	if r, ok := rs.Get(earlier); !ok || r.Snapshot != "20260807T140000Z" {
+		t.Errorf("the earlier record should stay as it was: %+v", rs)
+	}
+	f.mustNotRun("", "subvolume delete /pool/snap/home/20260807T140000Z")
 }

@@ -173,9 +173,7 @@ func TestCycle(t *testing.T) {
 		"    targets: [" + e.dst + "/backup]\n" +
 		"    retention:\n      pool: { min: 2 }\n      target: { min: 2 }\n")
 
-	// A first run creates both pools and copies the snapshot in full, the
-	// target's in the place marked for it.
-	e.gbsnap(0, "init", e.dst)
+	// A first run creates both pools and copies the snapshot in full.
 	e.gbsnap(0, "-c", cfg, "run")
 	if got := len(e.snapshots(e.src + "/snap")); got != 1 {
 		t.Fatalf("pool holds %d snapshots, want 1", got)
@@ -296,7 +294,6 @@ func TestRefusesDivergedTarget(t *testing.T) {
 		"    pool: " + e.src + "/snap\n" +
 		"    targets: [" + e.dst + "/backup]\n")
 
-	e.gbsnap(0, "init", e.dst)
 	e.gbsnap(0, "-c", cfg, "run")
 	name := e.latest(e.src + "/snap")
 
@@ -326,14 +323,11 @@ func TestRestoreIsSyncReversed(t *testing.T) {
 		"    subvolume: " + e.src + "/home\n" +
 		"    pool: " + e.src + "/snap\n" +
 		"    targets: [" + e.dst + "/backup]\n")
-	e.gbsnap(0, "init", e.dst)
 	e.gbsnap(0, "-c", cfg, "run")
 	name := e.latest(e.src + "/snap")
 
-	// The pool is lost, and the backup is sent back into a new one, in a place
-	// marked for it.
+	// The pool is lost, and the backup is sent back into a new one.
 	e.sudo("btrfs", "subvolume", "delete", filepath.Join(e.src, "snap", name))
-	e.gbsnap(0, "init", e.src)
 	e.gbsnap(0, "sync", e.dst+"/backup", e.src+"/restored")
 
 	if got := e.read(filepath.Join(e.src, "restored", name, "file")); got != "original" {
@@ -352,8 +346,6 @@ func TestOverSSH(t *testing.T) {
 		"    pool: " + e.src + "/snap\n" +
 		"    targets: [127.0.0.1:" + e.dst + "/backup]\n")
 
-	// The place is marked over ssh too.
-	e.gbsnap(0, "init", "127.0.0.1:"+e.dst)
 	e.gbsnap(0, "-c", cfg, "run")
 	name := e.latest(e.src + "/snap")
 	if got := e.read(filepath.Join(e.dst, "backup", name, "file")); got != "over ssh" {
@@ -383,7 +375,6 @@ func TestAwkwardRemotePath(t *testing.T) {
 		"    pool: " + e.src + "/snap\n" +
 		"    targets: [\"127.0.0.1:" + awkward + "\"]\n")
 
-	e.gbsnap(0, "init", "127.0.0.1:"+e.dst)
 	e.gbsnap(0, "-c", cfg, "run")
 	name := e.latest(e.src + "/snap")
 	if got := e.read(filepath.Join(awkward, name, "file")); got != "awkward" {

@@ -60,8 +60,10 @@ func (e *Engine) List(ctx context.Context, v *config.Volume) error {
 }
 
 // Status writes out where one volume stands and how far its targets trail it,
-// and when each last received. A target the pool has a record of but that is
-// no longer configured is shown too, since the pool keeps a snapshot for it.
+// and when each last received. A target the pool has a record of that is away
+// — no longer configured, or not the pool at its location now, as a disk taking
+// its turn elsewhere is not — is shown too, since the pool keeps a snapshot for
+// it.
 func (e *Engine) Status(ctx context.Context, v *config.Volume) error {
 	s, err := e.open(ctx, v)
 	if err != nil {
@@ -113,7 +115,7 @@ func (e *Engine) Status(ctx context.Context, v *config.Volume) error {
 	}
 	for _, r := range rs.List {
 		if !accounted[r.Target] {
-			fmt.Fprintf(w, "  ·\t%s\tnot a target now\t%s\tkept for it until gbsnap forget %s\n",
+			fmt.Fprintf(w, "  ·\t%s\taway\t%s\tkept for it until gbsnap forget %s\n",
 				r.Location, received(r), r.Target)
 		}
 	}
