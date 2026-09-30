@@ -191,11 +191,15 @@ A name may carry a tag, `20260807T143205Z-keep`. A tagged snapshot is protected:
 retention never touches it. Tags come from `gbsnap snap -tag`, they are visible in a
 plain `ls`, and they travel with the snapshot when it is replicated.
 
+A tag is a label, not part of what a snapshot is: a snapshot is paired with its
+copy by its time and ordinal, whatever tag either carries.
+
 `gbsnap untag <volume> <snapshot>` takes the tag off again, in the pool and at
 every target it can reach. A target that is offline has its copy renamed when
-it is next reached: a snapshot is paired with its copy by name, so the next
-sync or pruning looks for copies that differ from the pool's snapshots by their
-tag alone, and renames each once the UUID check has confirmed it is a copy.
+it is next reached: the next sync or pruning renames the tagged copies of
+snapshots the pool holds untagged, once the UUID check has confirmed each is a
+copy, so that pruning can have them there too. Tags only ever come off, so a
+restore, where the pool is the backup, puts none back.
 
 ## Retention
 
@@ -223,30 +227,44 @@ taking that for an empty pool would create one on whatever filesystem holds the
 mount point, and send everything into it.
 
 So on the receiving side of a send, gbsnap only creates a pool inside a place:
-a directory `gbsnap init <dir>` has marked, which it only does on btrfs. It
-writes a `.gbsnap-place` file there holding an ID of the place's own. `init`
-takes a remote directory as well, `[user@]host:path`. A pool that already exists
-is used wherever it is, marked or not.
+a directory `gbsnap init <dir>` has marked. It writes a `.gbsnap-place` file
+there holding an ID of the place's own, and takes a remote directory as well,
+`[user@]host:path`. A pool that already exists is used wherever it is, marked
+or not.
+
+Marking the wrong directory would bring the mistake back: a marker written into
+a bare mount point, on the filesystem holding it, would make it pass for the
+disk whenever the disk is away. So `init` makes no directory, marks only
+directories on btrfs, and refuses an empty one that is neither a mount point
+nor a subvolume of its own, which is what a disk that is not mounted leaves.
+`init -force` marks such a directory all the same, for a place that really is a
+plain directory.
 
 A target is **offline** when its pool is not there and its place is not marked,
 or when ssh cannot reach its host. `gbsnap sync` and `gbsnap run` skip it and
-say so, and the run does not fail for it, unless `-reach` asked it to reach
-every target. A destination named outright on the command line always has to be
-reached.
+say so, quoting ssh, which fails alike for a host that is off and for one that
+turns the login away. The run does not fail for it, unless `-reach` asked it to
+reach every target. A destination named outright on the command line always has
+to be reached.
 
-After each send, the pool records the newest snapshot the target now shares
-with it, in a `.gbsnap-targets` file in the pool's directory, keyed by the
-place's ID and the pool's name there. So a target reached by another path or
+After each send to one of a configured volume's targets, the pool records the
+newest snapshot the target now shares with it, in a `.gbsnap-targets` file in
+the pool's directory, keyed by the place's ID and the pool's name there. A send
+between pools named outright, a restore among them, records nothing: the source
+of a send is never written to. So a target reached by another path or
 address is still known as itself, and two disks taking turns at one mount point
 are known apart. While a target is offline, pruning keeps the snapshot its
 record names. The record is only ever trusted to say what to keep, never what to
 build on: that is for the UUID check to settle once the target is reached.
 
 `gbsnap status` shows each target's record: what it last received and when,
-whether it is offline, and any target the pool keeps a snapshot for though it
-is no longer configured. `gbsnap forget <target>` drops the record of a target
-retired for good, named by its pool, its place or its ID, so that pruning stops
-keeping a snapshot for it.
+whether it is offline (with the record's key), and any target the pool keeps a
+snapshot for though it is no longer configured. `gbsnap forget <target>` drops
+the record of a target retired for good, so that pruning stops keeping a
+snapshot for it. The target is named by its record's key or its place's ID, or
+by where it was reached, as its pool or its place; where that names more than
+one target, as it does two disks that took turns at one mount point, it is
+refused, and only the key will do.
 
 A target last reached by a version of gbsnap from before records has none until
 it is next reached.
@@ -288,9 +306,10 @@ backup that kept it longer. It goes as a change from the shared snapshot nearest
 to it, where there is one.
 
 `gbsnap restore <volume> [-snapshot <name>]` does the same for a configured
-volume, from the first of its targets that can be reached and holds anything. A
-volume a pattern stands for can be restored before its subvolume is there, or
-after it has gone: restore names it all the same.
+volume, from the first of its targets that can be reached and holds anything,
+or, with a snapshot named, holds that one. A volume a pattern stands for can be
+restored before its subvolume is there, or after it has gone: restore names it
+all the same, unless more than one pattern could stand for it.
 
 A pool being restored into that is not there yet has to be in a place, as any
 other destination does.

@@ -367,5 +367,6 @@ command flags:
   restore -snapshot name bring back that one snapshot, however old
   prune -min n           how many recent snapshots to keep
         -local           prune the volume's own pool alone, reaching no target
+  init  -force           mark an empty directory that is neither a mount point nor a subvolume
 `)
 }

@@ -57,7 +57,9 @@ func (s *volumeRun) prune(ctx context.Context, o PruneOpts) error {
 	for _, t := range reached {
 		pins := map[string]bool{}
 		if n, ok := shared[t]; ok {
-			pins[n.String()] = true
+			if theirs, ok := t.pool.Holds(n); ok {
+				pins[theirs.String()] = true
+			}
 		}
 		if err := s.prunePool(ctx, t.pool, s.v.Retention.Target, pins); err != nil {
 			return err

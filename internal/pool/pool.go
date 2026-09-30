@@ -154,20 +154,32 @@ func (p *Pool) Find(name string) (Name, bool) {
 	return Name{}, false
 }
 
+// Holds finds the pool's name for a snapshot, whatever tag either carries.
+func (p *Pool) Holds(n Name) (Name, bool) {
+	for _, e := range p.names {
+		if e.Same(n) {
+			return e, true
+		}
+	}
+	return Name{}, false
+}
+
 // Remove forgets a snapshot gbsnap has just deleted.
 func (p *Pool) Remove(n Name) {
 	p.names = slices.DeleteFunc(p.names, func(e Name) bool { return e.String() == n.String() })
 }
 
 // Common finds the newest snapshot held by both pools, which is the parent an
-// incremental send can build on.
+// incremental send can build on, as src names it. A snapshot is held by both
+// whatever tag each copy carries: the tag is a label, not part of what the
+// snapshot is.
 func Common(src, dst []Name) (Name, bool) {
 	held := map[string]bool{}
 	for _, n := range dst {
-		held[n.String()] = true
+		held[n.Key()] = true
 	}
 	for i := len(src) - 1; i >= 0; i-- {
-		if held[src[i].String()] {
+		if held[src[i].Key()] {
 			return src[i], true
 		}
 	}
@@ -181,7 +193,7 @@ func After(names []Name, n Name, has bool) []Name {
 	}
 	var out []Name
 	for _, e := range names {
-		if n.Before(e) {
+		if !n.Same(e) && n.Before(e) {
 			out = append(out, e)
 		}
 	}

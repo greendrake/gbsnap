@@ -21,6 +21,9 @@ const PlaceMarker = ".gbsnap-place"
 
 var placeIDRe = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
+// IsPlaceID reports whether s is written the way a place's ID is.
+func IsPlaceID(s string) bool { return placeIDRe.MatchString(s) }
+
 // NewPlaceID makes the ID for a place being marked. It only has to tell places
 // apart, so that a place reached by another path or address is still known as
 // itself, and two disks taking turns at one mount point are known apart.
@@ -50,11 +53,23 @@ func ReadPlace(ctx context.Context, r run.Runner, dir string) (string, error) {
 	return id, nil
 }
 
-// MarkPlace makes dir, which must be on a btrfs filesystem, a place for pools
-// with the given ID, creating the directory if need be.
-func MarkPlace(ctx context.Context, r run.Runner, dir, id string) error {
-	if err := r.Run(ctx, "mkdir", "-p", "--", dir); err != nil {
+// MarkPlace makes dir, which must be a directory on a btrfs filesystem, a
+// place for pools with the given ID.
+//
+// Marking the wrong directory would bring back the very mistake places exist
+// to prevent: a disk that is not mounted leaves a bare directory behind, and a
+// marker written there, on the filesystem holding the mount point, would make
+// that directory pass for the disk whenever the disk is away. So no directory
+// is made, and an empty one is refused unless it is a filesystem or a
+// subvolume of its own, which a bare mount point never is; force marks it all
+// the same, for a place that really is a plain directory.
+func MarkPlace(ctx context.Context, r run.Runner, dir, id string, force bool) error {
+	there, err := r.Test(ctx, "test", "-d", dir)
+	if err != nil {
 		return err
+	}
+	if !there {
+		return fmt.Errorf("%s is not a directory; mount the disk, or make the directory, first", dir)
 	}
 	// Only btrfs can receive a snapshot, so a place anywhere else could never
 	// hold a pool.
@@ -64,6 +79,23 @@ func MarkPlace(ctx context.Context, r run.Runner, dir, id string) error {
 	}
 	if fs := strings.TrimSpace(fs); fs != "btrfs" {
 		return fmt.Errorf("%s is on a %s filesystem, not btrfs", dir, fs)
+	}
+	if !force {
+		// A mount point and a subvolume's root both sit on a device of their
+		// own, which the directory holding them does not share.
+		devs, err := r.Output(ctx, "stat", "-c", "%d", "--", dir, path.Join(dir, ".."))
+		if err != nil {
+			return err
+		}
+		entries, err := r.Output(ctx, "ls", "-A", "--", dir)
+		if err != nil {
+			return err
+		}
+		d := strings.Fields(devs)
+		if len(d) == 2 && d[0] == d[1] && strings.TrimSpace(entries) == "" {
+			return fmt.Errorf("%s is an empty directory, neither a mount point nor a subvolume: if a disk mounts "+
+				"there, mount it first; if the directory itself is the place, mark it with -force", dir)
+		}
 	}
 	return writeFile(ctx, r, path.Join(dir, PlaceMarker), id+"\n")
 }

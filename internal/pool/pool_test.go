@@ -139,10 +139,15 @@ func TestCommon(t *testing.T) {
 		t.Error("nothing in common should report false")
 	}
 
-	// A tag is part of the name, so a tagged snapshot only matches a tagged one.
+	// A tag is a label, not part of what the snapshot is: a copy is shared
+	// whatever tag either side carries, and named as the source names it.
 	tagged := []Name{{Time: at("20260807T143201Z"), Tag: "keep"}}
-	if _, ok := Common(src, tagged); ok {
-		t.Error("a tagged name should not match an untagged one")
+	if got, ok := Common(src, tagged); !ok || got.String() != "20260807T143201Z" {
+		t.Errorf("Common across a tag = %v %v", got, ok)
+	}
+	// The ordinal is part of it, though.
+	if _, ok := Common(src, []Name{{Time: at("20260807T143201Z"), Ordinal: 2}}); ok {
+		t.Error("another ordinal is another snapshot")
 	}
 }
 
@@ -161,5 +166,19 @@ func TestAfter(t *testing.T) {
 	}
 	if got := After(all, all[2], true); len(got) != 0 {
 		t.Errorf("nothing follows the newest, got %v", names(got))
+	}
+	// A snapshot does not follow itself under another tag.
+	if got := After(all, Name{Time: at("20260807T143203Z"), Tag: "keep"}, true); len(got) != 0 {
+		t.Errorf("nothing follows the newest, tagged, got %v", names(got))
+	}
+}
+
+func TestHolds(t *testing.T) {
+	p := &Pool{names: []Name{{Time: at("20260807T143201Z"), Tag: "keep"}, {Time: at("20260807T143202Z")}}}
+	if got, ok := p.Holds(Name{Time: at("20260807T143201Z")}); !ok || got.Tag != "keep" {
+		t.Errorf("Holds = %v %v, want the pool's own, tagged name", got, ok)
+	}
+	if _, ok := p.Holds(Name{Time: at("20260807T143203Z")}); ok {
+		t.Error("Holds of a snapshot the pool lacks")
 	}
 }

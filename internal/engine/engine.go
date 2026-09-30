@@ -125,7 +125,10 @@ func (s *volumeRun) target(ctx context.Context, loc location.Location) (*target,
 		if !run.Unreachable(err) {
 			return nil, err
 		}
-		t.offline = fmt.Sprintf("%s cannot be reached", loc.Host)
+		// ssh fails the same way whether the host is down or turns the login
+		// away, so what ssh said goes along: a key that is refused must not
+		// pass for a host that is off.
+		t.offline = fmt.Sprintf("%s cannot be reached: %v", loc.Host, err)
 		s.targets[loc.String()] = t
 		return t, nil
 	}
@@ -169,8 +172,13 @@ func (s *volumeRun) loadRecords(ctx context.Context) (*pool.Records, error) {
 
 // remember records the newest snapshot a reachable target shares with the
 // pool, or that it shares none. A dry run records nothing, as it changes
-// nothing.
+// nothing. Nor does a send between pools named outright, a restore among
+// them: the records are what a configured volume's pool keeps for its targets,
+// and the source of a send must never need to be written to.
 func (s *volumeRun) remember(ctx context.Context, t *target) error {
+	if s.v.AdHoc {
+		return nil
+	}
 	rs, err := s.loadRecords(ctx)
 	if err != nil {
 		return err

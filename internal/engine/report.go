@@ -30,7 +30,7 @@ func (e *Engine) List(ctx context.Context, v *config.Volume) error {
 			continue
 		}
 		for _, n := range t.pool.Names() {
-			holders[n.String()] = append(holders[n.String()], loc.String())
+			holders[n.Key()] = append(holders[n.Key()], loc.String())
 		}
 	}
 
@@ -49,7 +49,7 @@ func (e *Engine) List(ctx context.Context, v *config.Volume) error {
 		row := n.String() + "\t" + protection
 		if len(v.Targets) > 0 {
 			at := "-"
-			if held := holders[n.String()]; len(held) > 0 {
+			if held := holders[n.Key()]; len(held) > 0 {
 				at = strings.Join(held, ", ")
 			}
 			row += "\t" + at
@@ -87,6 +87,9 @@ func (e *Engine) Status(ctx context.Context, v *config.Volume) error {
 			last = received(r)
 		}
 		if t.offline != "" {
+			if ok {
+				last += " (record " + r.Target + ")"
+			}
 			fmt.Fprintf(w, "  →\t%s\toffline\t%s\t%s\n", loc, last, t.offline)
 			continue
 		}
@@ -111,7 +114,7 @@ func (e *Engine) Status(ctx context.Context, v *config.Volume) error {
 	for _, r := range rs.List {
 		if !accounted[r.Target] {
 			fmt.Fprintf(w, "  ·\t%s\tnot a target now\t%s\tkept for it until gbsnap forget %s\n",
-				r.Location, received(r), r.Location)
+				r.Location, received(r), r.Target)
 		}
 	}
 	return nil

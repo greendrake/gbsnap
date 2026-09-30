@@ -177,7 +177,11 @@ func TestInitRefusesOtherFilesystems(t *testing.T) {
 	if fs := strings.TrimSpace(e.sh("stat", "-f", "-c", "%T", e.dir)); fs == "btrfs" {
 		t.Skip("the temporary directory is on btrfs")
 	}
-	out := e.gbsnap(1, "init", filepath.Join(e.dir, "elsewhere"))
+	elsewhere := filepath.Join(e.dir, "elsewhere")
+	if err := os.Mkdir(elsewhere, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out := e.gbsnap(1, "init", elsewhere)
 	if !strings.Contains(out, "not btrfs") {
 		t.Errorf("output:\n%s", out)
 	}
@@ -192,7 +196,10 @@ func TestRestoreVolumeThatIsGone(t *testing.T) {
 	e.sudo("btrfs", "subvolume", "create", filepath.Join(ws, "one"))
 	e.sudo("sh", "-c", "echo kept > "+filepath.Join(ws, "one", "file"))
 	e.sudo("mkdir", filepath.Join(e.src, "snap"))
-	e.gbsnap(0, "init", filepath.Join(e.src, "snap"))
+	// An empty plain directory could be a bare mount point, so marking it
+	// takes -force.
+	e.gbsnap(1, "init", filepath.Join(e.src, "snap"))
+	e.gbsnap(0, "init", "-force", filepath.Join(e.src, "snap"))
 	e.gbsnap(0, "init", e.dst)
 	cfg := e.config("defaults:\n  targets: [" + e.dst + "]\nvolumes:\n  ws:\n    subvolume: " + ws +
 		"/*\n    pool: " + e.src + "/snap/*\n")

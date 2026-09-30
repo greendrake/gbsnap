@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/greendrake/gbsnap/internal/config"
@@ -13,7 +14,7 @@ import (
 
 // Init marks a directory as a place for pools, the only kind of directory a
 // pool is ever created in on the receiving side of a send.
-func (e *Engine) Init(ctx context.Context, loc location.Location, sudo run.SudoMode) error {
+func (e *Engine) Init(ctx context.Context, loc location.Location, sudo run.SudoMode, force bool) error {
 	r := e.runner(loc, sudo)
 	id, err := pool.ReadPlace(ctx, r, loc.Path)
 	if err != nil {
@@ -27,14 +28,17 @@ func (e *Engine) Init(ctx context.Context, loc location.Location, sudo run.SudoM
 		return err
 	}
 	return e.do(fmt.Sprintf("mark %s as a place for pools, with ID %s", loc, id), func() error {
-		return pool.MarkPlace(ctx, r, loc.Path, id)
+		return pool.MarkPlace(ctx, r, loc.Path, id, force)
 	})
 }
 
 // Forget drops what a volume's pool records of a target retired for good, so
-// that pruning stops keeping a snapshot for it. The target is named by where
-// it was reached, as its pool or as the place holding it, or by its key or
-// place ID as status shows them. It reports how many records went.
+// that pruning stops keeping a snapshot for it. The target is named by its
+// record's key or its place's ID, as status shows them, or by where it was
+// last reached, as its pool or as the place holding it. Where that names
+// several targets, as it does two disks that took turns at one mount point, it
+// is refused, and only a key or an ID will do. It reports how many records
+// went.
 func (e *Engine) Forget(ctx context.Context, v *config.Volume, what string) (int, error) {
 	s, err := e.open(ctx, v)
 	if err != nil {
@@ -44,14 +48,29 @@ func (e *Engine) Forget(ctx context.Context, v *config.Volume, what string) (int
 	if err != nil {
 		return 0, err
 	}
-	named, parsed := location.Parse(what)
-	dropped := rs.Drop(func(r pool.Record) bool {
-		if r.Target == what || strings.HasPrefix(r.Target, what+"/") {
-			return true
-		}
+	byKey := func(r pool.Record) bool {
+		return r.Target == what || (pool.IsPlaceID(what) && strings.HasPrefix(r.Target, what+"/"))
+	}
+	named, parseErr := location.Parse(what)
+	byLocation := func(r pool.Record) bool {
 		at, err := location.Parse(r.Location)
-		return err == nil && parsed == nil && (at.Equal(named) || at.Parent().Equal(named))
-	})
+		return err == nil && parseErr == nil && (at.Equal(named) || at.Parent().Equal(named))
+	}
+	match := byKey
+	if !slices.ContainsFunc(rs.List, byKey) {
+		match = byLocation
+		var keys []string
+		for _, r := range rs.List {
+			if byLocation(r) {
+				keys = append(keys, r.Target)
+			}
+		}
+		if len(keys) > 1 {
+			return 0, fmt.Errorf("%s was where more than one target was reached (%s); forget one by its key, "+
+				"as status shows it", what, strings.Join(keys, ", "))
+		}
+	}
+	dropped := rs.Drop(match)
 	if len(dropped) == 0 {
 		return 0, nil
 	}
@@ -145,7 +164,7 @@ func (e *Engine) Subvolumes(ctx context.Context, dir location.Location, sudo run
 // Restore brings a volume's pool back from the first of its targets that can
 // be reached and holds a pool for it: everything that pool holds past what the
 // two share, or all of it when they share none, or, with a snapshot named,
-// that one snapshot however old. It is replication run the other way, the
+// that one snapshot however old, from the first target that holds it. It is replication run the other way, the
 // volume's own pool the destination.
 func (e *Engine) Restore(ctx context.Context, v *config.Volume, snapshot string) error {
 	if len(v.Targets) == 0 {
@@ -168,6 +187,15 @@ func (e *Engine) Restore(ctx context.Context, v *config.Volume, snapshot string)
 		case len(t.pool.Names()) == 0:
 			passed = append(passed, fmt.Sprintf("%s holds no snapshots", loc))
 			continue
+		case snapshot != "":
+			named, err := pool.ParseName(snapshot)
+			if err != nil {
+				return err
+			}
+			if _, ok := t.pool.Holds(named); !ok {
+				passed = append(passed, fmt.Sprintf("%s holds no snapshot %s", loc, snapshot))
+				continue
+			}
 		}
 		back := &volumeRun{
 			e:       e,

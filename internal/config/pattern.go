@@ -132,16 +132,28 @@ func (c *Config) Expand(ctx context.Context, list Lister) error {
 
 // Absent builds the volume a pattern would stand for, were its subvolume
 // there: what restoring one that is gone, or was never on this machine, starts
-// from. The first pattern that would take the name, and does not exclude it,
-// has it.
+// from. A name more than one pattern could take is refused, since nothing but
+// the subvolume that is not there would say which it belongs to: exclude it
+// from all but one.
 func (c *Config) Absent(name string) (*Volume, error) {
 	if err := nameProblem(name); err != nil {
 		return nil, err
 	}
+	var takers []*pattern
 	for _, p := range c.patterns {
 		if !slices.Contains(p.exclude, name) && !strings.HasPrefix(name, ".") {
-			return p.volume(name)
+			takers = append(takers, p)
 		}
 	}
-	return nil, fmt.Errorf("no volume %q in %s", name, c.Path)
+	switch len(takers) {
+	case 0:
+		return nil, fmt.Errorf("no volume %q in %s", name, c.Path)
+	case 1:
+		return takers[0].volume(name)
+	}
+	var keys []string
+	for _, p := range takers {
+		keys = append(keys, fmt.Sprintf("%q", p.key))
+	}
+	return nil, fmt.Errorf("%q could be a volume of %s alike; exclude it from all but one", name, strings.Join(keys, " and "))
 }

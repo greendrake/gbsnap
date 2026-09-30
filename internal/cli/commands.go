@@ -244,7 +244,10 @@ func commands() []*command {
 		},
 	}, {
 		name:  "init",
-		usage: "init <dir>",
+		usage: "init <dir> [-force]",
+		flags: func(fs *flag.FlagSet) {
+			fs.BoolVar(&force, "force", false, "mark an empty directory that is neither a mount point nor a subvolume")
+		},
 		run: func(ctx context.Context, a *app, args []string) error {
 			if len(args) != 1 {
 				return usagef("init takes one directory, given %d", len(args))
@@ -253,7 +256,7 @@ func commands() []*command {
 			if err != nil {
 				return usageError{err}
 			}
-			return a.engine.Init(ctx, loc, a.sudo)
+			return a.engine.Init(ctx, loc, a.sudo, force)
 		},
 	}, {
 		name:  "forget",

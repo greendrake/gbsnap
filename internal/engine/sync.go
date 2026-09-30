@@ -17,17 +17,23 @@ func (s *volumeRun) sync(ctx context.Context, o SyncOpts) error {
 		s.e.printer.Detail("%s: no targets, so nothing to send", s.v.Name)
 		return nil
 	}
-	if len(s.src.Names()) == 0 {
-		s.e.printer.Detail("%s: pool %s holds no snapshots to send", s.v.Name, s.v.Pool)
-		return nil
-	}
+	// A snapshot asked for by name has to be there, whatever else the pool
+	// holds or does not.
 	var want pool.Name
 	if o.Snapshot != "" {
-		n, ok := s.src.Find(o.Snapshot)
+		named, err := pool.ParseName(o.Snapshot)
+		if err != nil {
+			return err
+		}
+		n, ok := s.src.Holds(named)
 		if !ok {
 			return fmt.Errorf("pool %s holds no snapshot %s", s.v.Pool, o.Snapshot)
 		}
 		want = n
+	}
+	if len(s.src.Names()) == 0 {
+		s.e.printer.Detail("%s: pool %s holds no snapshots to send", s.v.Name, s.v.Pool)
+		return nil
 	}
 	// One unreachable target must not keep the others from being brought up to
 	// date, so every target is attempted and the failures reported together.
@@ -96,7 +102,7 @@ func (s *volumeRun) catchUp(ctx context.Context, t *target) error {
 // back. It goes as a change from the shared snapshot nearest to it, where
 // there is one.
 func (s *volumeRun) fetch(ctx context.Context, t *target, want pool.Name) error {
-	if _, ok := t.pool.Find(want.String()); ok {
+	if _, ok := t.pool.Holds(want); ok {
 		s.e.printer.Detail("%s: %s already holds %s", s.v.Name, t.loc, want)
 		return s.remember(ctx, t)
 	}
@@ -113,13 +119,13 @@ func (s *volumeRun) fetch(ctx context.Context, t *target, want pool.Name) error 
 func nearestShared(src, dst []pool.Name, n pool.Name) (pool.Name, bool) {
 	held := map[string]bool{}
 	for _, d := range dst {
-		held[d.String()] = true
+		held[d.Key()] = true
 	}
 	var before, after pool.Name
 	var hasBefore, hasAfter bool
 	for _, e := range src {
 		switch {
-		case !held[e.String()]:
+		case !held[e.Key()]:
 		case e.Before(n):
 			before, hasBefore = e, true
 		case n.Before(e) && !hasAfter:
@@ -140,7 +146,8 @@ func (s *volumeRun) buildsOn(ctx context.Context, dst *pool.Pool, parent pool.Na
 	if !hasParent {
 		return nil
 	}
-	if err := s.isCopyOfOurs(ctx, dst, parent, parent); err != nil {
+	theirs, _ := dst.Holds(parent)
+	if err := s.isCopyOfOurs(ctx, dst, parent, theirs); err != nil {
 		return fmt.Errorf("%s has diverged and cannot be built on: %w; "+
 			"delete that snapshot at the target to send afresh, "+
 			"or point the target at an empty pool", dst.Loc, err)
@@ -148,23 +155,21 @@ func (s *volumeRun) buildsOn(ctx context.Context, dst *pool.Pool, parent pool.Na
 	return nil
 }
 
-// reconcileTags brings the target's names in line with the pool's where a tag
-// came or went since the two last met. A snapshot is paired with its copy by
+// reconcileTags takes a tag off the target's copy of a snapshot that has lost
+// it in the pool since the two last met. A snapshot is paired with its copy by
 // name, so a copy left under its old name would never be recognised as shared
-// again, nor ever pruned. A copy is renamed only once the UUID check has
-// confirmed it is one.
+// again, nor ever pruned. A tag only ever comes off (untag), so only a copy
+// still carrying one is renamed: sent the other way, as a restore is, the pool
+// is the backup, whose names are the stale ones, and nothing is renamed. A
+// copy is renamed only once the UUID check has confirmed it is one.
 func (s *volumeRun) reconcileTags(ctx context.Context, dst *pool.Pool) error {
 	for _, theirs := range slices.Clone(dst.Names()) {
-		if _, ok := s.src.Find(theirs.String()); ok {
+		if !theirs.Protected() {
 			continue
 		}
-		i := slices.IndexFunc(s.src.Names(), theirs.Same)
-		if i < 0 {
+		ours, ok := s.src.Holds(theirs)
+		if !ok || ours.Protected() {
 			continue
-		}
-		ours := s.src.Names()[i]
-		if _, ok := dst.Find(ours.String()); ok {
-			continue // both names are there, and the stray is not gbsnap's to settle
 		}
 		if err := s.isCopyOfOurs(ctx, dst, ours, theirs); err != nil {
 			return fmt.Errorf("%s is not a copy of %s, so it keeps its name: %w",

@@ -349,3 +349,22 @@ func TestAbsent(t *testing.T) {
 		}
 	}
 }
+
+// A name two patterns could both stand for is refused, rather than restored
+// into whichever came first.
+func TestAbsentAmbiguous(t *testing.T) {
+	cfg, err := parse([]byte("volumes:\n  vms:\n    subvolume: /vms/*\n    pool: /vms/.snap/*\n" +
+		"  ws:\n    subvolume: /ws/*\n    pool: /ws/.snap/*\n    exclude: [db]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Expand(context.Background(), fakeLister(map[string][]string{"/vms": nil, "/ws": nil})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cfg.Absent("foo"); err == nil || !strings.Contains(err.Error(), "all but one") {
+		t.Errorf("Absent(foo) = %v", err)
+	}
+	if v, err := cfg.Absent("db"); err != nil || v.Pool.String() != "/vms/.snap/db" {
+		t.Errorf("Absent(db) = %+v, %v", v, err)
+	}
+}

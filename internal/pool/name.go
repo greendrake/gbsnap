@@ -77,10 +77,14 @@ func (n Name) String() string {
 }
 
 // Same reports whether two names are of one snapshot, whatever tag each
-// carries: a tag can come and go, but the time and ordinal never change.
+// carries: a tag can come and go, but the time and ordinal never change, and
+// no pool holds two snapshots of one time and ordinal.
 func (n Name) Same(o Name) bool {
 	return n.Time.Equal(o.Time) && n.Ordinal == o.Ordinal
 }
+
+// Key is what a snapshot is known by across pools: its name without a tag.
+func (n Name) Key() string { return n.Untagged().String() }
 
 // Untagged is the name without its tag.
 func (n Name) Untagged() Name {
