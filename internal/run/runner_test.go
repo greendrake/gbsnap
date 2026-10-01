@@ -396,7 +396,7 @@ func TestLocalSudoIsKeptAlive(t *testing.T) {
 	}
 	refreshes := func() int {
 		recorded, _ := os.ReadFile(log)
-		return strings.Count(string(recorded), "-n -v\n")
+		return strings.Count(string(recorded), "-n true\n")
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for refreshes() < 2 && time.Now().Before(deadline) {

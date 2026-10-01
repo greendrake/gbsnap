@@ -153,9 +153,14 @@ func (e *Exec) startKeepAlive() {
 			case <-e.stop:
 				return
 			case <-tick.C:
-				// -n: refresh what is cached, never ask. A refresh that fails
-				// leaves the next command to report sudo's complaint.
-				_ = exec.Command("sudo", "-n", "-v").Run()
+				// Running a command on the cached credentials refreshes them.
+				// A command, not -v: -v needs a password unless every sudoers
+				// rule of the user's says NOPASSWD (verifypw=all), so with a
+				// NOPASSWD rule for some commands beside one asking for others
+				// it would fail, where a command goes by the rule it matches.
+				// -n: never ask. A refresh that fails leaves the next command
+				// to report sudo's complaint.
+				_ = exec.Command("sudo", "-n", "true").Run()
 			}
 		}
 	}()
