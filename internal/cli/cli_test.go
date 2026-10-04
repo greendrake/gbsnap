@@ -324,3 +324,31 @@ func TestConfigurationInPieces(t *testing.T) {
 		}
 	}
 }
+
+// A volume a pattern stands for can be named by the commands that only read or
+// tidy its pools, list, status and untag, even when its subvolume isn't found
+// (gone, or a mount the pattern leaves out): its pool outlives it. Taking a
+// snapshot still refuses a name no subvolume answers to.
+func TestPatternVolumeWithoutItsSubvolume(t *testing.T) {
+	dir := t.TempDir()
+	for _, d := range []string{"ws", "snap/gone"} {
+		if err := os.MkdirAll(filepath.Join(dir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := configFile(t, "volumes:\n  ws:\n    subvolume: "+dir+"/ws/*\n    pool: "+dir+"/snap/*\n")
+
+	for _, args := range [][]string{{"list", "gone"}, {"status", "gone"}} {
+		if code, out := runGbsnap(t, append([]string{"-c", cfg, "-sudo", "never"}, args...)...); code != 0 {
+			t.Errorf("%s: exit %d; output:\n%s", args[0], code, out)
+		}
+	}
+	code, out := runGbsnap(t, "-c", cfg, "-sudo", "never", "untag", "gone", "2026-01-01T00:00:00Z")
+	if code != exitFailure || !strings.Contains(out, "holds no snapshot") {
+		t.Errorf("untag should reach the pool and find no such snapshot: exit %d; output:\n%s", code, out)
+	}
+	code, out = runGbsnap(t, "-c", cfg, "-sudo", "never", "snap", "gone")
+	if code == 0 || !strings.Contains(out, `no volume "gone"`) {
+		t.Errorf("snap should refuse a name no subvolume answers to: exit %d; output:\n%s", code, out)
+	}
+}

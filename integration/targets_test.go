@@ -3,7 +3,9 @@
 package integration
 
 import (
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -140,15 +142,23 @@ func TestUntag(t *testing.T) {
 	e.gbsnap(0, "-c", cfg, "untag", "home", tagged)
 	untagged := strings.TrimSuffix(tagged, "-keep")
 	for _, pool := range []string{e.src + "/snap", e.dst + "/backup"} {
-		names := strings.Join(e.snapshots(pool), " ")
-		if strings.Contains(names, tagged) || !strings.Contains(names, untagged) {
-			t.Errorf("%s holds %s, want %s untagged", pool, names, tagged)
+		// By whole names: two snapshots taken in one second are told apart by a
+		// suffix (20261004T021646Z and 20261004T021646Z.2), so one name can be
+		// a prefix of another's.
+		names := e.snapshots(pool)
+		if slices.Contains(names, tagged) || !slices.Contains(names, untagged) {
+			t.Errorf("%s holds %v, want %s untagged", pool, names, tagged)
 		}
 	}
-	e.gbsnap(0, "-c", cfg, "prune")
+	// Untagged, it is a snapshot like any other, and goes once it falls outside
+	// the newest min. The newest snapshot both pools hold, the base of the next
+	// incremental send, is kept on top of those min, not as one of them: so it
+	// takes one more, newer snapshot, sent too, to leave it out.
+	e.write("more")
+	e.gbsnap(0, "-c", cfg, "run")
 	for _, pool := range []string{e.src + "/snap", e.dst + "/backup"} {
-		if names := strings.Join(e.snapshots(pool), " "); strings.Contains(names, untagged) {
-			t.Errorf("%s still holds %s once untagged: %s", pool, untagged, names)
+		if names := e.snapshots(pool); slices.Contains(names, untagged) {
+			t.Errorf("%s still holds %s once untagged: %v", pool, untagged, names)
 		}
 	}
 }
@@ -175,6 +185,34 @@ func TestPatternFindsSubvolumes(t *testing.T) {
 		if strings.Contains(out, unwanted) {
 			t.Errorf("the pattern should not have found %s:\n%s", unwanted, out)
 		}
+	}
+}
+
+// A mount among a pattern's subvolumes is another filesystem, whose top
+// directory is inode 256 as a subvolume's is; the pattern leaves it out,
+// saying so, rather than fail to snapshot it into a pool on this one.
+func TestPatternLeavesOutMounts(t *testing.T) {
+	e := setup(t)
+	ws := filepath.Join(e.src, "ws")
+	e.sudo("mkdir", ws)
+	e.sudo("btrfs", "subvolume", "create", filepath.Join(ws, "one"))
+	mounted, image := filepath.Join(ws, "mounted"), filepath.Join(e.dir, "mounted.img")
+	e.sudo("mkdir", mounted)
+	e.sh("truncate", "-s", "512M", image)
+	e.sh("mkfs.btrfs", "-q", image)
+	e.sudo("mount", "-o", "loop", image, mounted)
+	t.Cleanup(func() { exec.Command("sudo", "umount", mounted).Run() }) // before setup's, which unmounts e.src
+	cfg := e.config("volumes:\n  ws:\n    subvolume: " + ws + "/*\n    pool: " + e.src + "/snap/*\n")
+
+	out := e.gbsnap(0, "-c", cfg, "snap")
+	if !strings.Contains(out, ws+"/one to ") {
+		t.Errorf("the pattern should have found %s/one:\n%s", ws, out)
+	}
+	if !strings.Contains(out, mounted+" is a mount of another filesystem, so it is left out") {
+		t.Errorf("the pattern should have left out %s, saying so:\n%s", mounted, out)
+	}
+	if strings.Contains(out, mounted+" to ") {
+		t.Errorf("the pattern should not have snapshotted %s:\n%s", mounted, out)
 	}
 }
 

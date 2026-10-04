@@ -19,11 +19,34 @@ jobs:
       - run: make lint
       - run: make test
 
+  integration:
+    name: integration tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      # Real btrfs filesystems on loop devices, made and mounted through the
+      # runner's passwordless sudo, and an sshd for the tests over ssh, which
+      # starts its own with a configuration of its own (sshd wants its
+      # privilege separation directory, which only the service makes). The
+      # runner's account has a locked password, for which an sshd without PAM,
+      # as the tests run it, turns every login down, keys included: '*' is no
+      # password either, but not a lock.
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends btrfs-progs openssh-server
+          sudo mkdir -p -m 0755 /run/sshd
+          sudo usermod -p '*' "$(id -un)"
+      - run: make test-integration
+
   release:
     name: release
-    needs: check
+    needs: [check, integration]
     # Only a push to a branch whose commit asks for it, and only once the
-    # checks above have passed: nothing is published that did not build clean.
+    # checks above have passed, the integration tests included: nothing is
+    # published that did not build clean.
     if: >-
       github.event_name == 'push' &&
       github.ref_type == 'branch' &&

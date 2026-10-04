@@ -450,13 +450,22 @@ func TestForget(t *testing.T) {
 	}
 }
 
+// findSubvolumes is the command Subvolumes finds a directory's subvolumes with.
+func findSubvolumes(dir string) []string {
+	return []string{"find", dir, "-mindepth", "1", "-maxdepth", "1", "-type", "d", "-inum", "256",
+		"!", "-name", ".*", "-printf", "%f\n"}
+}
+
 func TestSubvolumes(t *testing.T) {
 	f := newFixture(t, false)
 	f.host("").
 		Script([]string{"test", "-d", "/ws"}, run.Reply{}).
-		Script([]string{"find", "/ws", "-mindepth", "1", "-maxdepth", "1", "-type", "d", "-inum", "256",
-			"!", "-name", ".*", "-printf", "%f\n"}, run.Reply{Out: "wild\ncupla\n"}).
-		Script([]string{"test", "-d", "/absent"}, run.Reply{False: true})
+		Script(findSubvolumes("/ws"), run.Reply{Out: "wild\ncupla\n"}).
+		Script([]string{"realpath", "-e", "--", "/ws"}, run.Reply{Out: "/ws\n"}).
+		Script([]string{"findmnt", "-rn", "-o", "TARGET"}, run.Reply{Out: "/\n/ws\n/other/wild\n"}).
+		Script([]string{"test", "-d", "/absent"}, run.Reply{False: true}).
+		Script([]string{"test", "-d", "/empty"}, run.Reply{}).
+		Script(findSubvolumes("/empty"), run.Reply{})
 
 	got, err := f.e.Subvolumes(context.Background(), location.Location{Path: "/ws"}, run.SudoAuto)
 	if err != nil || strings.Join(got, " ") != "wild cupla" {
@@ -465,6 +474,52 @@ func TestSubvolumes(t *testing.T) {
 	got, err = f.e.Subvolumes(context.Background(), location.Location{Path: "/absent"}, run.SudoAuto)
 	if err != nil || len(got) != 0 {
 		t.Errorf("Subvolumes of a missing directory = %q, %v", got, err)
+	}
+	// With nothing found, the mount table isn't read (it isn't scripted for
+	// /empty, and an unscripted command fails).
+	got, err = f.e.Subvolumes(context.Background(), location.Location{Path: "/empty"}, run.SudoAuto)
+	if err != nil || len(got) != 0 {
+		t.Errorf("Subvolumes of a directory holding none = %q, %v", got, err)
+	}
+}
+
+// A mount among what a pattern finds is another filesystem, whose top
+// directory is inode 256 like a subvolume's; it is left out, saying so. The
+// mount table holds paths with symbolic links resolved and unsafe characters
+// escaped, and a directory's are matched against them that way.
+func TestSubvolumesLeaveOutMounts(t *testing.T) {
+	f := newFixture(t, false)
+	f.host("").
+		Script([]string{"test", "-d", "/home/u/ws"}, run.Reply{}).
+		Script(findSubvolumes("/home/u/ws"), run.Reply{Out: "wild\nuk\nmy disk\ncupla\n"}).
+		Script([]string{"realpath", "-e", "--", "/home/u/ws"}, run.Reply{Out: "/var/home/u/ws\n"}).
+		Script([]string{"findmnt", "-rn", "-o", "TARGET"},
+			run.Reply{Out: "/\n/var\n/var/home/u/ws/uk\n/var/home/u/ws/my\\x20disk\n/var/home/u/ws/uk/deeper\n"})
+
+	got, err := f.e.Subvolumes(context.Background(), location.Location{Path: "/home/u/ws"}, run.SudoAuto)
+	if err != nil || strings.Join(got, ",") != "wild,cupla" {
+		t.Errorf("Subvolumes = %q, %v", got, err)
+	}
+	out := f.out.String()
+	for _, want := range []string{"/home/u/ws/uk is a mount of another filesystem, so it is left out",
+		"/home/u/ws/my disk is a mount of another filesystem, so it is left out"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestUnescapeHex(t *testing.T) {
+	for in, want := range map[string]string{
+		`/a/my\x20disk`: "/a/my disk",
+		`/a/b\x5cc`:     `/a/b\c`,
+		`/a/\xzz`:       `/a/\xzz`,
+		`/a/end\x2`:     `/a/end\x2`,
+		"/plain":        "/plain",
+	} {
+		if got := unescapeHex(in); got != want {
+			t.Errorf("unescapeHex(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 

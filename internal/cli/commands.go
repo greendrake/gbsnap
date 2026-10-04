@@ -152,7 +152,7 @@ func commands() []*command {
 				}
 				return a.engine.List(ctx, config.AdHoc(locs[0], nil, 1, a.sudo))
 			}
-			volumes, err := a.volumes(ctx, args)
+			volumes, err := a.poolVolumes(ctx, args)
 			if err != nil {
 				return err
 			}
@@ -184,7 +184,7 @@ func commands() []*command {
 		name:  "status",
 		usage: "status [<volume>...]",
 		run: func(ctx context.Context, a *app, args []string) error {
-			volumes, err := a.volumes(ctx, args)
+			volumes, err := a.poolVolumes(ctx, args)
 			if err != nil {
 				return err
 			}
@@ -233,7 +233,7 @@ func commands() []*command {
 			if len(args) != 2 {
 				return usagef("untag takes a volume and one of its snapshots")
 			}
-			volumes, err := a.volumes(ctx, args[:1])
+			volumes, err := a.poolVolumes(ctx, args[:1])
 			if err != nil {
 				return err
 			}

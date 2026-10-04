@@ -6,6 +6,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -322,7 +324,7 @@ func (e *Engine) Run(ctx context.Context, v *config.Volume, reach bool) error {
 
 // Subvolumes lists the subvolumes directly inside dir whose names do not start
 // with a dot: what a pattern in the configuration stands for. A directory
-// that is not there holds none.
+// that is not there holds none, and a mount there is none of them.
 func (e *Engine) Subvolumes(ctx context.Context, dir location.Location, sudo run.SudoMode) ([]string, error) {
 	r := e.runner(dir, sudo)
 	there, err := r.Test(ctx, "test", "-d", dir.Path)
@@ -342,5 +344,66 @@ func (e *Engine) Subvolumes(ctx context.Context, dir location.Location, sudo run
 			names = append(names, line)
 		}
 	}
-	return names, nil
+	if len(names) == 0 {
+		return names, nil
+	}
+	// A mount there is another filesystem, whose top directory is inode 256
+	// as a subvolume's is. A snapshot can't leave its filesystem, so one of it
+	// could never go into a pool beside the others, and backing it up is its
+	// own owner's business: it is left out, saying so.
+	mounts, err := mountsIn(ctx, r, dir.Path)
+	if err != nil {
+		return nil, err
+	}
+	kept := names[:0]
+	for _, name := range names {
+		if mounts[name] {
+			e.printer.Action("%s is a mount of another filesystem, so it is left out", dir.Child(name))
+			continue
+		}
+		kept = append(kept, name)
+	}
+	return kept, nil
+}
+
+// mountsIn names the mounts directly inside dir. They come from the mount
+// table, not from device numbers, which every subvolume has of its own; the
+// table holds each mount's path with its symbolic links resolved, so dir's
+// are too, and findmnt's raw output escapes unsafe characters as \xNN.
+func mountsIn(ctx context.Context, r run.Runner, dir string) (map[string]bool, error) {
+	real, err := r.Output(ctx, "realpath", "-e", "--", dir)
+	if err != nil {
+		return nil, err
+	}
+	real = strings.TrimSuffix(real, "\n")
+	out, err := r.Output(ctx, "findmnt", "-rn", "-o", "TARGET")
+	if err != nil {
+		return nil, err
+	}
+	mounts := map[string]bool{}
+	for _, line := range strings.Split(out, "\n") {
+		if line == "" {
+			continue
+		}
+		if target := unescapeHex(line); path.Dir(target) == real {
+			mounts[path.Base(target)] = true
+		}
+	}
+	return mounts, nil
+}
+
+// unescapeHex undoes findmnt's \xNN escapes.
+func unescapeHex(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+3 < len(s) && s[i+1] == 'x' {
+			if n, err := strconv.ParseUint(s[i+2:i+4], 16, 8); err == nil {
+				b.WriteByte(byte(n))
+				i += 3
+				continue
+			}
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
 }
