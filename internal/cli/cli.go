@@ -248,6 +248,19 @@ func (a *app) config(ctx context.Context) (*config.Config, error) {
 // volumes selects the configured volumes named on the command line, or all of
 // them when none is named.
 func (a *app) volumes(ctx context.Context, names []string) ([]*config.Volume, error) {
+	return a.pick(ctx, names, false)
+}
+
+// poolVolumes is volumes for the commands that only read or tidy a volume's
+// pools (list, status, untag): a volume a pattern stands for can be named even
+// when its subvolume isn't found, gone or a mount the pattern leaves out, as
+// its pool outlives it. The commands that take snapshots still refuse a name
+// no subvolume answers to, so that a misspelt one is an error, not a no-op.
+func (a *app) poolVolumes(ctx context.Context, names []string) ([]*config.Volume, error) {
+	return a.pick(ctx, names, true)
+}
+
+func (a *app) pick(ctx context.Context, names []string, absentToo bool) ([]*config.Volume, error) {
 	cfg, err := a.config(ctx)
 	if err != nil {
 		return nil, err
@@ -257,6 +270,9 @@ func (a *app) volumes(ctx context.Context, names []string) ([]*config.Volume, er
 		chosen = nil
 		for _, name := range names {
 			v, err := cfg.Volume(name)
+			if err != nil && absentToo {
+				v, err = cfg.Absent(name)
+			}
 			if err != nil {
 				return nil, usageError{err}
 			}

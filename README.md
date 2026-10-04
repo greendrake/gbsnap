@@ -147,7 +147,9 @@ its own, each gets a pool named after it in the directories the defaults name. N
 starting with a dot never match, nor does anything that is not a subvolume, nor a
 mount of another filesystem, which a snapshot could not leave (it is left out,
 saying so: backing it up is its own owner's business), and `exclude` leaves out
-the names it lists. The volumes found take the pattern's
+the names it lists. A pool outlives its subvolume, so `list`, `status`, `untag`
+and `restore` also take the name of a volume a pattern stands for whose
+subvolume isn't found; the commands that take snapshots refuse it. The volumes found take the pattern's
 place among the others, in name order, and are found afresh at every run, so a
 fixed configuration covers subvolumes as they come and go.
 
