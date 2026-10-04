@@ -30,11 +30,15 @@ jobs:
       # Real btrfs filesystems on loop devices, made and mounted through the
       # runner's passwordless sudo, and an sshd for the tests over ssh, which
       # starts its own with a configuration of its own (sshd wants its
-      # privilege separation directory, which only the service makes).
+      # privilege separation directory, which only the service makes). The
+      # runner's account has a locked password, for which an sshd without PAM,
+      # as the tests run it, turns every login down, keys included: '*' is no
+      # password either, but not a lock.
       - run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends btrfs-progs openssh-server
           sudo mkdir -p -m 0755 /run/sshd
+          sudo usermod -p '*' "$(id -un)"
       - run: make test-integration
 
   release:
