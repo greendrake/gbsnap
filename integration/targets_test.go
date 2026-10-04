@@ -5,6 +5,7 @@ package integration
 import (
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -141,9 +142,12 @@ func TestUntag(t *testing.T) {
 	e.gbsnap(0, "-c", cfg, "untag", "home", tagged)
 	untagged := strings.TrimSuffix(tagged, "-keep")
 	for _, pool := range []string{e.src + "/snap", e.dst + "/backup"} {
-		names := strings.Join(e.snapshots(pool), " ")
-		if strings.Contains(names, tagged) || !strings.Contains(names, untagged) {
-			t.Errorf("%s holds %s, want %s untagged", pool, names, tagged)
+		// By whole names: two snapshots taken in one second are told apart by a
+		// suffix (20261004T021646Z and 20261004T021646Z.2), so one name can be
+		// a prefix of another's.
+		names := e.snapshots(pool)
+		if slices.Contains(names, tagged) || !slices.Contains(names, untagged) {
+			t.Errorf("%s holds %v, want %s untagged", pool, names, tagged)
 		}
 	}
 	// Untagged, it is a snapshot like any other, and goes once it falls outside
@@ -153,8 +157,8 @@ func TestUntag(t *testing.T) {
 	e.write("more")
 	e.gbsnap(0, "-c", cfg, "run")
 	for _, pool := range []string{e.src + "/snap", e.dst + "/backup"} {
-		if names := strings.Join(e.snapshots(pool), " "); strings.Contains(names, untagged) {
-			t.Errorf("%s still holds %s once untagged: %s", pool, untagged, names)
+		if names := e.snapshots(pool); slices.Contains(names, untagged) {
+			t.Errorf("%s still holds %s once untagged: %v", pool, untagged, names)
 		}
 	}
 }
