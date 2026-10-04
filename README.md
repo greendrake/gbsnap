@@ -144,8 +144,10 @@ A volume whose subvolume ends in `/*` stands for every subvolume directly inside
 that directory, each a volume of its own, named after its subvolume. Its pool,
 and any targets of its own, have a `*` where that name goes; without targets of
 its own, each gets a pool named after it in the directories the defaults name. Names
-starting with a dot never match, nor does anything that is not a subvolume, and
-`exclude` leaves out the names it lists. The volumes found take the pattern's
+starting with a dot never match, nor does anything that is not a subvolume, nor a
+mount of another filesystem, which a snapshot could not leave (it is left out,
+saying so: backing it up is its own owner's business), and `exclude` leaves out
+the names it lists. The volumes found take the pattern's
 place among the others, in name order, and are found afresh at every run, so a
 fixed configuration covers subvolumes as they come and go.
 
