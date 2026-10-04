@@ -57,18 +57,21 @@ func sshFixture(t *testing.T, dir string) {
 	port := freePort(t)
 	pidFile := filepath.Join(dir, "sshd.pid")
 	config := filepath.Join(dir, "sshd_config")
+	// Its log says why it turns a login down, which the client can't: a skip
+	// carries it.
+	logFile := filepath.Join(dir, "sshd.log")
 	settings := fmt.Sprintf(
 		"Port %d\nListenAddress 127.0.0.1\nHostKey %s\nAuthorizedKeysFile %s\nPidFile %s\n"+
 			"StrictModes no\nUsePAM no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\n"+
-			"PubkeyAuthentication yes\nPermitRootLogin no\nAllowUsers %s\nLogLevel ERROR\n",
+			"PubkeyAuthentication yes\nPermitRootLogin no\nAllowUsers %s\nLogLevel VERBOSE\n",
 		port, hostKey, authorized, pidFile, currentUser(t))
 	if err := os.WriteFile(config, []byte(settings), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	start := exec.Command("sudo", "-n", sshd, "-f", config)
+	start := exec.Command("sudo", "-n", sshd, "-f", config, "-E", logFile)
 	if os.Geteuid() == 0 {
-		start = exec.Command(sshd, "-f", config)
+		start = exec.Command(sshd, "-f", config, "-E", logFile)
 	}
 	if out, err := start.CombinedOutput(); err != nil {
 		t.Skipf("could not start an ssh daemon: %v\n%s", err, out)
@@ -97,7 +100,8 @@ func sshFixture(t *testing.T, dir string) {
 
 	waitForPort(t, port)
 	if out, err := exec.Command("ssh", "-o", "BatchMode=yes", "127.0.0.1", "true").CombinedOutput(); err != nil {
-		t.Skipf("the test ssh daemon would not accept a connection: %v\n%s", err, out)
+		log, _ := exec.Command("sudo", "-n", "cat", logFile).CombinedOutput()
+		t.Skipf("the test ssh daemon would not accept a connection: %v\n%s\nits log:\n%s", err, out, log)
 	}
 }
 

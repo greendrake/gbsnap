@@ -146,7 +146,12 @@ func TestUntag(t *testing.T) {
 			t.Errorf("%s holds %s, want %s untagged", pool, names, tagged)
 		}
 	}
-	e.gbsnap(0, "-c", cfg, "prune")
+	// Untagged, it is a snapshot like any other, and goes once it falls outside
+	// the newest min. The newest snapshot both pools hold, the base of the next
+	// incremental send, is kept on top of those min, not as one of them: so it
+	// takes one more, newer snapshot, sent too, to leave it out.
+	e.write("more")
+	e.gbsnap(0, "-c", cfg, "run")
 	for _, pool := range []string{e.src + "/snap", e.dst + "/backup"} {
 		if names := strings.Join(e.snapshots(pool), " "); strings.Contains(names, untagged) {
 			t.Errorf("%s still holds %s once untagged: %s", pool, untagged, names)
