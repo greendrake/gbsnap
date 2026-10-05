@@ -303,6 +303,35 @@ func TestSnapChangedByProbe(t *testing.T) {
 	f.mustRun("", "subvolume delete /pool/snap/home/.gbsnap-probe")
 }
 
+// When the probe can't tell whether anything changed, the volume is
+// snapshotted regardless, saying why, rather than left out of its backup: the
+// probe only decides whether a snapshot is worth taking.
+func TestSnapTakenWhenProbeFails(t *testing.T) {
+	f := newFixture(t, false)
+	v := volume(t, "/home")
+	f.pool("/pool/snap/home", "20260807T140000Z")
+	f.host("").Script([]string{"btrfs", "filesystem", "sync", "/home"}, run.Reply{})
+	f.subvolume("/home", shown{uuid: liveUUID, generation: 43})
+	f.subvolume("/pool/snap/home/20260807T140000Z", shown{
+		uuid: snapUUID, parent: liveUUID, generation: 42, readOnly: true})
+	f.host("").
+		Script([]string{"test", "-e", "/pool/snap/home/.gbsnap-probe"}, run.Reply{False: true}).
+		Script([]string{"btrfs", "subvolume", "snapshot", "-r", "/home", "/pool/snap/home/.gbsnap-probe"}, run.Reply{}).
+		Script([]string{"btrfs", "subvolume", "delete", "/pool/snap/home/.gbsnap-probe"}, run.Reply{}).
+		Script([]string{"btrfs", "subvolume", "snapshot", "-r", "/home", "/pool/snap/home/" + nowStamp}, run.Reply{})
+	f.host("").Replies[probeKey("/pool/snap/home/20260807T140000Z")] = run.Reply{Err: errors.New("the dump gave up")}
+
+	if err := f.e.Snap(context.Background(), v, "", false); err != nil {
+		t.Fatal(err)
+	}
+	f.mustRun("", "snapshot -r /home /pool/snap/home/"+nowStamp)
+	f.mustRun("", "subvolume delete /pool/snap/home/.gbsnap-probe")
+	if out := f.output(); !strings.Contains(out, "could not tell whether it changed since 20260807T140000Z") ||
+		!strings.Contains(out, "the dump gave up") {
+		t.Errorf("output = %q", out)
+	}
+}
+
 // A probe snapshot left behind by an interrupted run is cleared rather than
 // colliding with the new one.
 func TestSnapClearsLeftoverProbe(t *testing.T) {

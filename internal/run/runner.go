@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/greendrake/gbsnap/internal/ui"
@@ -336,15 +337,36 @@ func (e *Exec) Pipe(ctx context.Context, argv []string, dst Runner, dstArgv []st
 	sinkWait := sink.Wait()
 	srcWait := <-srcDone
 
-	// The sender is reported first: when it fails the receiver only ever sees a
-	// truncated stream, and its complaint would bury the real cause.
-	if srcWait != nil {
+	// The side that failed first is reported. That's usually the sender: when it
+	// fails the receiver only ever sees a truncated stream, and its complaint
+	// would bury the real cause. But a sender killed by a broken pipe failed
+	// because the receiver had stopped reading, and then the receiver's own
+	// error is the cause.
+	if srcWait != nil && !brokenPipe(srcWait) {
 		return dstOut.String(), e.failure(argv, srcErr.String(), srcWait)
 	}
 	if sinkWait != nil {
 		return dstOut.String(), de.failure(dstArgv, dstErr.String(), sinkWait)
 	}
+	if srcWait != nil {
+		return dstOut.String(), de.failure(dstArgv, dstErr.String(),
+			errors.New("it stopped reading before the end of the stream, though it exited cleanly"))
+	}
 	return dstOut.String(), nil
+}
+
+// brokenPipe reports whether a command died writing to a pipe no one was
+// reading any more: killed by SIGPIPE, or a shell or ssh reporting a command
+// that was (exit 141, 128 plus SIGPIPE's 13).
+func brokenPipe(err error) bool {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return false
+	}
+	if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() && status.Signal() == syscall.SIGPIPE {
+		return true
+	}
+	return exitErr.ExitCode() == 128+int(syscall.SIGPIPE)
 }
 
 // Quote renders argv as a single shell word sequence, safe to hand to a remote

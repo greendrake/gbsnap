@@ -432,3 +432,57 @@ func TestNoKeepAliveWithoutSudo(t *testing.T) {
 		t.Errorf("sudo ran without being needed:\n%s", recorded)
 	}
 }
+
+// A pipe reports the side that failed first. A sender killed by a broken pipe
+// failed because the receiver stopped reading, so the receiver's error is the
+// one reported then; a sender failing on its own is reported over whatever
+// the receiver made of the truncated stream.
+func TestPipeReportsTheSideThatFailedFirst(t *testing.T) {
+	ctx := context.Background()
+	e := NewExec("", SudoNever, quiet())
+	endless := []string{"sh", "-c", "while :; do echo x; done"}
+
+	for _, tc := range []struct {
+		name     string
+		src, dst []string
+		want     []string
+		unwanted string
+	}{{
+		name:     "the receiver gives up",
+		src:      endless,
+		dst:      []string{"sh", "-c", "read -r line; echo receiver gave up >&2; exit 3"},
+		want:     []string{"receiver gave up", "exit status 3", "read -r line"},
+		unwanted: "broken pipe",
+	}, {
+		name:     "the receiver stops early but exits cleanly",
+		src:      endless,
+		dst:      []string{"sh", "-c", "read -r line"},
+		want:     []string{"stopped reading before the end of the stream"},
+		unwanted: "broken pipe",
+	}, {
+		name:     "the sender fails on its own",
+		src:      []string{"sh", "-c", "echo partial; echo sender broke >&2; exit 4"},
+		dst:      []string{"sh", "-c", "cat >/dev/null; echo truncated stream >&2; exit 5"},
+		want:     []string{"sender broke", "exit status 4"},
+		unwanted: "truncated stream",
+	}} {
+		_, err := e.Pipe(ctx, tc.src, e, tc.dst)
+		if err == nil {
+			t.Errorf("%s: no error", tc.name)
+			continue
+		}
+		for _, w := range tc.want {
+			if !strings.Contains(err.Error(), w) {
+				t.Errorf("%s: error lacks %q: %v", tc.name, w, err)
+			}
+		}
+		if strings.Contains(err.Error(), tc.unwanted) {
+			t.Errorf("%s: error has %q: %v", tc.name, tc.unwanted, err)
+		}
+	}
+
+	out, err := e.Pipe(ctx, []string{"printf", "%s", "stream"}, e, []string{"cat"})
+	if err != nil || out != "stream" {
+		t.Errorf("a clean pipe = %q, %v", out, err)
+	}
+}
