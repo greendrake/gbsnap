@@ -271,6 +271,9 @@ A generation that has moved settles nothing, because reading a file moves it
 too. Only then does gbsnap take a throwaway snapshot and describe the difference in
 full. Anything at all counts as a change — data, permissions, ownership,
 extended attributes, a file added or removed — except timestamps on their own.
+Should describing it fail, the snapshot is taken regardless, saying why: the
+question only decides whether a snapshot is worth taking, and a skipped one would
+leave the volume out of its backup.
 
 `gbsnap snap -force` skips the question entirely.
 

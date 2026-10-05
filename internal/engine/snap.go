@@ -90,6 +90,14 @@ func (s *volumeRun) changed(ctx context.Context, latest pool.Name) (changed, dec
 	}
 
 	changed, err = s.probe(ctx, latest)
+	if err != nil && ctx.Err() == nil {
+		// The probe only decides whether a snapshot is worth taking. When it
+		// can't tell, one is taken regardless: an unneeded snapshot costs next
+		// to nothing, and a skipped one leaves the volume out of its backup.
+		s.e.printer.Error("%s: could not tell whether it changed since %s, so it is snapshotted regardless: %v",
+			s.v.Name, latest, err)
+		return true, true, nil
+	}
 	return changed, true, err
 }
 
